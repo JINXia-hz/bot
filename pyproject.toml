@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bot"
+version = "0.1.0"
+description = "图数据库驱动的 QQ 群记账机器人 - 数据点/数据线/事件 模型"
+requires-python = ">=3.10"
+dependencies = [
+    "nonebot2[fastapi]>=2.2.0",
+    "nonebot-adapter-onebot>=2.4.0",
+    "kuzu>=0.3.0",
+    "openai>=1.0.0",
+    "apscheduler>=3.10.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+]
