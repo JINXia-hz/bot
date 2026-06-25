@@ -141,7 +141,17 @@ class InferenceEngine:
             }),
             "user_latest_dp": ("user_latest_dp", {"user_name": resolved.get("user_name", "")}),
             "latest_balance": ("latest_balance_in_event", {"event_id": resolved.get("event_id", "")}),
-            "debt_in_event": ("debt_dps_for_event", {"event_id": resolved.get("event_id", "")}),
+            "debt_in_event": ("debt_in_event", {"event_id": resolved.get("event_id", "")}),
+            "global_debts_between": ("global_debts_between", {
+                "debtor": resolved.get("debtor", ""),
+                "creditor": resolved.get("creditor", ""),
+            }),
+            "global_owes_summary": ("global_owes_summary", {"user_name": resolved.get("user_name", "")}),
+            "user_in_event": ("user_in_event", {
+                "user_name": resolved.get("user_name", ""),
+                "event_id": resolved.get("event_id", ""),
+            }),
+            "events_for_person": ("events_for_person", {"user_name": resolved.get("user_name", "")}),
             "pending_reservation": ("pending_reservations", {}),
             "reservation_due": ("reservation_due", {}),
             "event_due_settle": ("event_due_for_settle", {}),
@@ -222,6 +232,8 @@ class InferenceEngine:
             resolved_g = b.get(g_val)
 
             if isinstance(resolved_c, Var) and isinstance(resolved_g, Var):
+                if resolved_c == resolved_g:
+                    continue
                 extended = b.extend(resolved_c, resolved_g)
                 if extended is None:
                     return None
@@ -259,6 +271,8 @@ class InferenceEngine:
             return self._prove_compute(clause, binding)
         elif clause_type == "not_":
             return self._prove_not(clause, binding)
+        elif clause_type == "resolve":
+            return self._prove_resolve(clause, binding)
         elif clause_type == "create_dp":
             return self._prove_create_dp(clause, binding)
         elif clause_type == "link":
@@ -306,21 +320,13 @@ class InferenceEngine:
         if result is None:
             return []
 
-        items = result if isinstance(result, list) else [result]
-        if not items:
-            return []
-
-        bindings_out = []
-        for item in items:
-            b = binding.copy()
-            if result_var is not None:
-                extended = b.extend(result_var, item)
-                if extended is None:
-                    continue
-                b = extended
-            bindings_out.append(b)
-
-        return bindings_out
+        b = binding.copy()
+        if result_var is not None:
+            extended = b.extend(result_var, result)
+            if extended is None:
+                return []
+            b = extended
+        return [b]
 
     def _prove_rule_clause(self, clause: dict, binding: Binding) -> list[Binding]:
         """证明引用另一条规则的子句。"""
@@ -455,6 +461,15 @@ class InferenceEngine:
             logger.warning(f"[inference] 计算失败 {op}: {e}")
             return None
 
+    def _prove_resolve(self, clause: dict, binding: Binding) -> list[Binding]:
+        """从已绑定的 dict 中提取字段值到新 Var。"""
+        source_val = binding.get(clause["source"])
+        if isinstance(source_val, dict) and clause["field"] in source_val:
+            field_value = source_val[clause["field"]]
+            b = binding.copy().extend(clause["target"], field_value)
+            return [b] if b is not None else []
+        return []
+
     def _prove_create_dp(self, clause: dict, binding: Binding) -> list[Binding]:
         """创建数据点（写入 ops 队列）。"""
         dp_type = clause["dp_type"]
@@ -561,10 +576,10 @@ class InferenceEngine:
 
         if new_fact is not None:
             logger.info(f"[inference] 前向链触发: {new_fact}")
-            # 匹配 triggers
-            triggered = self._match_triggers(new_fact)
-            for rule in triggered:
-                self._prove_rule(rule, rule.conclusion, Binding())
+            # 匹配 triggers 并提取初始绑定
+            matched_with_binding = self._match_triggers_with_binding(new_fact)
+            for rule, init_binding in matched_with_binding:
+                self._prove_rule(rule, rule.conclusion, init_binding)
         else:
             # 定时检测：触发所有无条件的周期规则
             for rule in self.rule_base.get_all_rules():
@@ -573,19 +588,29 @@ class InferenceEngine:
 
         return self.collect_ops()
 
-    def _match_triggers(self, fact: Fact) -> list[Rule]:
-        """根据新事实匹配规则触发器。"""
+    def _match_triggers_with_binding(self, fact: Fact) -> list[tuple]:
+        """根据新事实匹配规则触发器，同时提取变量绑定。"""
         matched = []
         for rule in self.rule_base.get_by_trigger(fact.predicate):
-            # 检查 trigger 的参数是否与 fact 兼容
             for trigger in rule.triggers:
                 if trigger.get("type") == "action" and trigger.get("op") == fact.predicate:
                     trigger_params = trigger.get("params", {})
-                    # 简单匹配：fact.args 包含 trigger 所需的所有键
                     if all(k in fact.args for k in trigger_params):
-                        matched.append(rule)
+                        # 构建绑定：trigger Var → fact 值
+                        b = Binding()
+                        for k, v in trigger_params.items():
+                            if isinstance(v, Var):
+                                b = b.extend(v, fact.args.get(k))
+                                if b is None:
+                                    break
+                        if b is not None:
+                            matched.append((rule, b))
                         break
         return matched
+
+    def _match_triggers(self, fact: Fact) -> list:
+        """根据新事实匹配规则触发器（兼容旧接口）。"""
+        return [r for r, _ in self._match_triggers_with_binding(fact)]
 
     def _is_timed_rule(self, rule: Rule) -> bool:
         """判断是否为定时触发规则（无 trigger action，但有 conditions 需要周期性检查）。"""

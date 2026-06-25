@@ -224,6 +224,25 @@ class Clause:
         return clause
 
     @staticmethod
+    def resolve(source_var: 'Var | str', field: str, target_var: 'Var'):
+        """从已绑定的 dict 中提取字段值到新 Var。
+
+        当 graph 查询返回 dict 时，后续 clause 可能需要 dict 中的某个字段值。
+        resolve 将 source_var 绑定值的 field 字段提取到 target_var。
+
+        例：
+          Clause.graph("find_event", ..., Var("Ev"))       # Ev = {"id":"e1",...}
+          Clause.resolve(Var("Ev"), "id", Var("E"))        # E = "e1"
+          Clause.graph("event_expenses", {"event_id": Var("E")}, ...)  # 成功
+
+        Args:
+            source_var: 源 Var（已绑定到 dict）
+            field: 要提取的字段名
+            target_var: 目标 Var（接收字段值）
+        """
+        return {"type": "resolve", "source": source_var, "field": field, "target": target_var}
+
+    @staticmethod
     def action(op: str, params: dict[str, Any]):
         """执行操作指令。
 

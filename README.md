@@ -193,6 +193,7 @@ Rule(
     conclusion=Fact("debt", {"debtor": Var("A"), "creditor": Var("B"), "amount": Var("X"), "event": Var("ET")}),
     conditions=[
         Clause.graph("find_event_by_title", {"title": Var("ET")}, Var("Ev")),
+        Clause.resolve(Var("Ev"), "id", Var("E")),                              # 从事件 dict 提取 id
         Clause.graph("debt_in_event", {"event_id": Var("E")}, Var("Debts")),
         Clause.action("extract_debt_item", {"debts": Var("Debts"), ...}),
     ],
@@ -358,7 +359,26 @@ py -3.12 bot.py
 
 ---
 
-## 7. 技术栈
+## 7. 测试
+
+62 个测试全部通过，覆盖三层：
+
+| 层 | 测试数 | 测试内容 |
+|---|--------|----------|
+| **单元测试** (`tests/unit/`) | 53 | DSL 全部原语、图的每种命名查询、推理引擎前向/后向链、ActionHandler 全部动作 |
+| **集成测试** (`tests/integration/`) | 9 | 支出→balance→debt 完整链路、穿透还款多场景、参与者自动补入 |
+| **E2E** | 0 | 暂延迟：需要启动 bot 实例和真实 LLM |
+
+运行方式：
+```powershell
+py -3.12 -m pytest tests/ -v
+```
+
+🎯 零 LLM 消耗：所有测试通过 Mock Translator + 内存 kuzu 数据库执行，不使用任何 API 调用。
+
+---
+
+## 8. 技术栈
 
 - **Bot 框架**: NoneBot2 + OneBot V11
 - **图数据库**: kuzu（嵌入式，零配置）

@@ -36,6 +36,8 @@ class EventRepo(BaseRepo):
             事件 ID
         """
         eid = event_id or self.new_id()
+        now = self.now()
+        auto_val = auto_settle_at if auto_settle_at else now
         self.execute("""
             CREATE (e:Event {
                 id: $id,
@@ -53,11 +55,11 @@ class EventRepo(BaseRepo):
             "title": title,
             "status": EventStatus.ACTIVE,
             "trigger_type": trigger_type,
-            "auto_settle_at": auto_settle_at or "",
-            "settled_at": "",
+            "auto_settle_at": auto_val,
+            "settled_at": now,
             "summary_dp_id": "",
             "created_by": created_by,
-            "now": self.now(),
+            "now": now,
         })
         return eid
 
@@ -73,6 +75,7 @@ class EventRepo(BaseRepo):
 
     def settle(self, event_id: str, summary_dp_id: str) -> None:
         """结算事件：设置状态为 settled，关联统合数据点。"""
+        now = self.now()
         self.execute("""
             MATCH (e:Event {id: $id})
             SET e.status = $status,
@@ -81,19 +84,20 @@ class EventRepo(BaseRepo):
         """, {
             "id": event_id,
             "status": EventStatus.SETTLED,
-            "now": self.now(),
+            "now": now,
             "summary_dp_id": summary_dp_id,
         })
 
     def cancel(self, event_id: str) -> None:
         """取消事件。"""
+        now = self.now()
         self.execute("""
             MATCH (e:Event {id: $id})
             SET e.status = $status, e.settled_at = $now
         """, {
             "id": event_id,
             "status": EventStatus.CANCELLED,
-            "now": self.now(),
+            "now": now,
         })
 
     # ── 查询 ────────────────────────────────────

@@ -20,8 +20,13 @@ def _new_id() -> str:
 
 
 def _now_iso() -> str:
-    """返回 ISO 8601 格式的 UTC 当前时间。"""
+    """返回 ISO 8601 格式的 UTC 当前时间（字符串）。"""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _now_dt():
+    """返回 kuzu TIMESTAMP 兼容的当前时间。"""
+    return datetime.now().replace(microsecond=0)
 
 
 class BaseRepo:
@@ -65,5 +70,11 @@ class BaseRepo:
         return _new_id()
 
     @staticmethod
-    def now() -> str:
+    def now():
+        """返回 kuzu TIMESTAMP 兼容的当前时间。"""
+        return _now_dt()
+
+    @staticmethod
+    def now_iso() -> str:
+        """返回 ISO 8601 时间字符串（用于字符串比较等场景）。"""
         return _now_iso()

@@ -23,13 +23,10 @@ def register(rb) -> None:
             "event_id": Var("E"),
         }),
         conditions=[
-            # 按标题搜索事件
             Clause.graph("find_event_like", {"title": Var("ET")}, Var("Ev")),
-            # 获取事件 ID
-            # (从 Ev 中提取 event_id，用 find_event_by_title 直接拿)
-            Clause.graph("find_event_by_title", {"title": Var("ET")}, Var("Ev2")),
-            # 查最新 balance
+            Clause.resolve(Var("Ev"), "id", Var("E")),
             Clause.graph("latest_balance_in_event", {"event_id": Var("E")}, Var("Bal")),
+            Clause.resolve(Var("Bal"), "payload", Var("P")),
         ],
     ))
 
@@ -46,6 +43,8 @@ def register(rb) -> None:
         conditions=[
             # 1. 找到事件
             Clause.graph("find_event_by_title", {"title": Var("ET")}, Var("Ev")),
+            # 1.5 从事件 dict 提取 event_id
+            Clause.resolve(Var("Ev"), "id", Var("E")),
             # 2. 获取债务数据点
             Clause.graph("debt_in_event", {"event_id": Var("E")}, Var("Debts")),
             # 3. 匹配具体的债务项
@@ -70,6 +69,7 @@ def register(rb) -> None:
         }),
         conditions=[
             Clause.graph("find_event_like", {"title": Var("ET")}, Var("Ev")),
+            Clause.resolve(Var("Ev"), "id", Var("E")),
             Clause.graph("debt_in_event", {"event_id": Var("E")}, Var("Debts")),
             Clause.action("extract_debt_item", {
                 "debts": Var("Debts"),
@@ -92,6 +92,7 @@ def register(rb) -> None:
         }),
         conditions=[
             Clause.graph("find_event_like", {"title": Var("ET")}, Var("Ev")),
+            Clause.resolve(Var("Ev"), "id", Var("E")),
             Clause.graph("debt_in_event", {"event_id": Var("E")}, Var("Debts")),
             Clause.action("extract_debt_item", {
                 "debts": Var("Debts"),
@@ -114,6 +115,7 @@ def register(rb) -> None:
         }),
         conditions=[
             Clause.graph("find_event_like", {"title": Var("ET")}, Var("Ev")),
+            Clause.resolve(Var("Ev"), "id", Var("E")),
             Clause.graph("debt_in_event", {"event_id": Var("E")}, Var("Debts")),
             Clause.action("extract_debt_item", {
                 "debts": Var("Debts"),

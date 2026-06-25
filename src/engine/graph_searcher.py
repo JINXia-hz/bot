@@ -574,22 +574,21 @@ class GraphSearcher:
         }
 
     def _q_events_for_person(self, params: dict) -> list[dict]:
-        """某人参与的所有活跃事件。
-
-        query_name: events_for_person
-        params: {user_name}
-        returns: [{id, title}]
-        """
+        """某人参与的所有活跃事件。"""
         user = params.get("user_name", "")
         if not user:
             return []
         result = self.conn.execute("""
             MATCH (dp:DataPoint {user_name: $user})-[:BELONGS_TO]->(e:Event {status: 'active'})
-            RETURN DISTINCT e.id, e.title
-            ORDER BY e.created_at ASC
+            RETURN DISTINCT e.id AS eid, e.title AS etitle, e.created_at AS ts
+            ORDER BY ts ASC
         """, {"user": user})
         items = []
         while result.has_next():
-            eid, etitle = result.get_next()
+            eid, etitle, _ts = result.get_next()
             items.append({"id": eid, "title": str(etitle)})
         return items
+
+    # debt_in_event alias
+    def _q_debt_in_event(self, params: dict) -> list[dict]:
+        return self._q_debt_dps_for_event(params)
