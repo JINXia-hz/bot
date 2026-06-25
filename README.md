@@ -1,6 +1,6 @@
 # bot — 图记忆驱动的 QQ 群记账助手
 
-基于 **kuzu 图数据库** + **规则引擎** + **LLM** 的群聊记账机器人。
+基于 **kuzu 图数据库** + **逻辑规则引擎** + **LLM** 的群聊记账机器人。
 
 数据不可变、因果可追溯。规则引擎做确定计算，LLM 只负责理解自然语言。
 
@@ -40,6 +40,7 @@ FormalLanguage ──MANAGES──→ Event              "管理者"
 ```
 expense(张三,150) ──DATA_LINE──→ balance({张三:{paid:150, owe:110, net:+40}, ...})
 balance ──DATA_LINE──→ debt({debtor:李四, creditor:张三, amount:30})
+debt ──DATA_LINE──→ debt_settled({amount:30, status:fully_paid})
 debt ──DATA_LINE──→ settlement_summary(...)
 ```
 
@@ -52,6 +53,8 @@ debt ──DATA_LINE──→ settlement_summary(...)
 | `expense` | `{amount, category, note}` | 用户记一笔 → 触发 balance 重算 |
 | `balance` | `{张三:{paid, owe, net}, 李四:{paid, owe, net}, ...}` | 每次新 expense 后自动生成 |
 | `debt` | `{debtor, creditor, amount}` | 从 balance 净额矩阵贪心分配 |
+| `debt_settled` | `{debtor, creditor, amount, status}` | 还款时创建，DATA_LINE 连接原 debt |
+| `participant_entry` | `{event_title, role}` | 新参与者首次在事件中记账时自动创建 |
 | `reservation` | `{title, content, time, people}` | 预定后创建，到期后激活 |
 | `personal_reservation` | `{title, time, status}` | 为每个参与者各创建一条 |
 | `settlement_summary` | `{event_title, participants, financial_summary}` | 结算时生成 |
@@ -70,12 +73,14 @@ debt ──DATA_LINE──→ settlement_summary(...)
   ├─ @bot 有向消息 → Orchestrator.on_directed_message()
   │   │
   │   ├─ 1. 存储有向消息
-  │   ├─ 2. 收集时间窗口（30min）内的无向消息作为上下文
-  │   ├─ 3. 查询图数据库上下文（活跃事件、待付账单、近期数据点）
-  │   ├─ 4. LLM 翻译：NL → {intent, response?, instructions?}
+  │   ├─ 2. 精简化上下文收集：
+  │   │     a. 取两个 @bot 之间的区间消息（list_since_last_directed）
+  │   │     b. 提取区间内所有发言者 → 追溯每人最近 12 条消息
+  │   │     c. 查询活跃事件列表（仅 id + title + 参与者）
+  │   ├─ 3. LLM 翻译：NL → {intent, response?, instructions?}
   │   │
   │   ├─ intent=query
-  │   │   ├─ 如果 instructions 包含 query_type → 规则引擎后向链 → 确定计算 → 结果给 LLM 润色
+  │   │   ├─ 如果 instructions 包含 query_type → 规则引擎后向链 → 确定计算 → LLM 润色
   │   │   └─ 否则 → LLM 直接回答
   │   │
   │   └─ intent=action
@@ -116,40 +121,28 @@ debt ──DATA_LINE──→ settlement_summary(...)
 Rule（声明式规则） → InferenceEngine（推理引擎） → ActionHandler / GraphSearcher（执行/检索）
 ```
 
-**规则库** (`src/engine/rules/`): 声明式 Prolog 风格规则，只定义"什么成立需要什么条件"，不包含 how-to 代码。
+**规则库** (`src/engine/rules/`): 声明式规则，只定义"什么成立需要什么条件"。
 
 **推理引擎** (`src/engine/inference.py`): 实现后向链和前向链，递归证明规则。
 
-**图搜索引擎** (`src/engine/graph_searcher.py`): 将 kuzu Cypher 暴露为命名查询，供规则子句调用。
+**图搜索引擎** (`src/engine/graph_searcher.py`): 将 kuzu Cypher 暴露为命名查询，含跨事件穿透查询。
 
 ### 3.2 前向链（Fact-Driven / Action 模式）
 
 当 LLM 产出一条 FL（如 `record_expense`），规则引擎将其包装为 Fact 注入：
 
 ```python
-# Orchestrator 中
 new_fact = Fact(predicate="record_expense", args={"user_name":"张三", "amount":150, "note":"火锅局"})
 ops = inference.forward_chain(new_fact)
 ```
 
-推理引擎查找 triggers 包含 `record_expense` 的规则，匹配到 `expense_triggers_posting`：
+推理引擎匹配到 `expense_triggers_posting`，链式展开：
 
 ```python
-Rule(
-    name="expense_triggers_posting",
-    triggers=[Clause.action("record_expense", {...})],
-    conclusion=Fact("expense_posted", {...}),
-    conditions=[
-        Clause.graph("find_event_like", {"title": Var("N")}, Var("Ev")),      # 搜事件
-        Clause.create_dp("expense", {...}, Var("DP1")),                        # 创建 expense dp
-        Clause.link("BELONGS_TO", Var("DP1"), Var("E")),                       # 关联事件
-        Clause.rule("compute_event_balance", {...}),                           # 链式调 balance 规则
-        Clause.rule("decompose_debts_if_balanced", {...}),                     # 链式调债务拆解规则
-    ],
-)
+# 1. 搜事件 → 2. 自动补入参与者 → 3. 创建 expense dp → 4. compute_event_balance → 5. decompose_debts
 ```
 
-`compute_event_balance` 规则再链式展开：
+`compute_event_balance` 规则：
 
 ```python
 Rule(
@@ -169,6 +162,7 @@ Rule(
 
 **一条 `record_expense` 最终产出的 Ops**：
 ```
+create_dp("participant_entry", {张三, 火锅局})  # 如果张三之前不在事件中
 create_dp("expense", {张三, 150, event:火锅局})
 link BELONGS_TO
 create_dp("balance", {张三:{+40}, 李四:{-30}, 王五:{-10}})
@@ -179,11 +173,10 @@ create_dp("debt", {debtor:王五, creditor:张三, amount:10})
 
 ### 3.3 后向链（Query 模式）
 
-用户问"火锅局张三欠李四多少"，LLM 产出：
+用户问"A欠B多少"，LLM 产出结构化查询：
 
 ```json
-{"intent":"query", "response":"让我查查...",
- "instructions":[{"query_type":"debt", "params":{"debtor":"张三","creditor":"李四","event":"火锅局"}}]}
+{"intent":"query", "instructions":[{"query_type":"debt", "params":{"debtor":"张三","creditor":"李四","event":"火锅局"}}]}
 ```
 
 Orchestrator 调用推理引擎后向链：
@@ -192,28 +185,67 @@ Orchestrator 调用推理引擎后向链：
 bindings = inference.query(Fact("debt", {"debtor":"张三", "creditor":"李四", "event":"火锅局"}))
 ```
 
-推理引擎匹配到 `debt_query` 规则：
+推理引擎匹配到 `debt_query` 规则，从图中检索已计算的 debt dp：
 
 ```python
 Rule(
     name="debt_query",
     conclusion=Fact("debt", {"debtor": Var("A"), "creditor": Var("B"), "amount": Var("X"), "event": Var("ET")}),
     conditions=[
-        Clause.graph("find_event_by_title", {"title": Var("ET")}, Var("Ev")),    # 按标题找事件
-        Clause.graph("debt_in_event", {"event_id": Var("E")}, Var("Debts")),     # 搜事件下所有 debt dp
-        Clause.action("extract_debt_item", {                                      # 匹配具体债务项
-            "debts": Var("Debts"),
-            "debtor": Var("A"), "creditor": Var("B"), "amount": Var("X"),
-        }),
+        Clause.graph("find_event_by_title", {"title": Var("ET")}, Var("Ev")),
+        Clause.graph("debt_in_event", {"event_id": Var("E")}, Var("Debts")),
+        Clause.action("extract_debt_item", {"debts": Var("Debts"), ...}),
     ],
 )
 ```
 
 **确定性返回**：`[{debtor:"张三", creditor:"李四", amount:40, event:"火锅局"}]`
 
-这个结果是**从图数据中确定计算的**，不是 LLM 猜的。LLM 仅负责将结果润色为自然友好的群聊消息。
+LLM 仅负责将结果润色为自然友好的群聊消息。
 
-### 3.4 否定（Negation as Failure）
+### 3.4 全局欠款查询
+
+用户问"我一共欠多少"，触发 `global_debt_query` 规则：
+
+```python
+Rule(
+    name="global_debt_query",
+    conclusion=Fact("global_debt", {"person": Var("P"), "total_owe": Var("TO"), "total_owed": Var("TR"), "net": Var("N")}),
+    conditions=[
+        Clause.graph("global_owes_summary", {"user_name": Var("P")}, Var("Summary")),
+    ],
+)
+```
+
+`global_owes_summary` 跨所有活跃事件聚合，返回 `{total_owe, total_owed, net, details}`。
+
+### 3.5 穿透还款（跨事件、溢出填补）
+
+用户说"我还了张三50"，LLM 产出：
+
+```json
+{"op": "repay", "params": {"debtor": "李四", "creditor": "张三", "amount": 50}}
+```
+
+规则引擎前向链 `repay_triggers_settlement`：
+
+```python
+Rule(
+    name="repay_triggers_settlement",
+    triggers=[Clause.action("repay", {"debtor": Var("D"), "creditor": Var("C"), "amount": Var("A")})],
+    conditions=[
+        Clause.graph("global_debts_between", {"debtor": Var("D"), "creditor": Var("C")}, Var("AllDebts")),
+        Clause.action("repay_with_overflow", {"debts": Var("AllDebts"), "total_amount": Var("A"), ...}),
+    ],
+)
+```
+
+`repay_with_overflow` 按金额升序逐一清偿跨事件债务：
+- 还清一笔 → 创建 `debt_settled` dp + DATA_LINE
+- 溢出部分填补下一笔
+- 全还完还有剩 → 创建反向 credit dp（对方反过来欠）
+
+### 3.6 否定（Negation as Failure）
 
 ```python
 Rule(
@@ -228,7 +260,13 @@ Rule(
 
 当 `expense_triggers_posting` 因为找不到匹配事件而失败时，引擎回溯尝试 `expense_without_event`。
 
-### 3.5 如何新增能力
+### 3.7 事件隔离 & 参与者自动补入
+
+同一个 @bot 消息只匹配一个活跃事件。新事件和已有事件完全隔离（不同的 Event 节点，各自 BELONGS_TO 关系）。
+
+如果一个参与者不在事件中时记账，`ensure_user_in_event` 自动创建 `participant_entry` dp 将其加入。不需要 LLM 参与，全是后台格式化操作。
+
+### 3.8 如何新增能力
 
 只需在 `src/engine/rules/` 下新增规则文件 + 在 `__init__.py` 中注册：
 
@@ -266,27 +304,27 @@ src/
 │   ├── event_repo.py          # Event CRUD + 生命周期
 │   ├── action_log_repo.py     # ActionLog CRUD
 │   ├── formal_language_repo.py # FormalLanguage CRUD
-│   ├── raw_message_repo.py    # RawMessage CRUD
-│   └── context_assembler.py   # 组装 LLM 图上下文文本
+│   ├── raw_message_repo.py    # RawMessage CRUD + 区间查询 + 按人追溯
+│   └── context_assembler.py   # 组装 LLM 上下文（完整/轻量事件匹配两种）
 │
 ├── engine/                    # 规则引擎 + 推理层
 │   ├── rule_engine.py         # Rule / Clause / Fact / Var / Binding DSL
-│   ├── inference.py           # 后向链 + 前向链推理引擎
-│   ├── graph_searcher.py      # 图搜索引擎（Cypher → 命名查询）
-│   ├── action_handler.py      # 内置动作处理器（计算余额、拆解债务等）
+│   ├── inference.py           # 后向链 + 前向链推理引擎（含统一算法、回溯）
+│   ├── graph_searcher.py      # 图搜索引擎（~30 种命名查询，含跨事件穿透）
+│   ├── action_handler.py      # 内置动作处理器（balance、债务贪心、穿透还款、参与者补入）
 │   ├── translator.py          # LLM 翻译器（NL ↔ FL）
 │   ├── executor.py            # v2 兼容占位（旧假 handler 已删除）
 │   ├── event_manager.py       # 事件生命周期管理（结算摘要生成）
 │   └── rules/                 # 声明式规则库
 │       ├── __init__.py        # 注册入口
-│       ├── expense_rules.py   # 支出 → 过账 → balance → 债务拆解
-│       ├── aa_rules.py        # 债务/余额查询（后向链）
-│       ├── reservation_rules.py # 预定 → 事件激活 → 定时提醒
+│       ├── expense_rules.py   # 支出→过账→balance→债务拆解 + 参与者自动补入
+│       ├── aa_rules.py        # 债务查询 + 全局欠款 + 穿透还款
+│       ├── reservation_rules.py # 预定→事件激活→定时提醒
 │       └── settlement_rules.py  # 自动/手动结算
 │
 ├── pipeline/                  # 流程编排层
-│   ├── orchestrator.py        # 主编排器：message → inference → ops → 落地
-│   └── scheduler.py           # APScheduler 定时任务
+│   ├── orchestrator.py        # 主编排器：区间上下文→LLM→inference→ops 落地
+│   └── scheduler.py           # APScheduler 定时任务（前向链驱动结算）
 │
 └── plugins/                   # NoneBot2 插件层
     └── listener.py            # 群消息监听 + 有向消息路由
@@ -324,7 +362,7 @@ py -3.12 bot.py
 
 - **Bot 框架**: NoneBot2 + OneBot V11
 - **图数据库**: kuzu（嵌入式，零配置）
-- **推理引擎**: Prolog 风格前向链 + 后向链
+- **推理引擎**: 前向链 + 后向链（含穿透债务、跨事件检索）
 - **LLM**: DeepSeek / OpenAI 兼容 API
 - **任务调度**: APScheduler
 - **Web 服务**: FastAPI + uvicorn
