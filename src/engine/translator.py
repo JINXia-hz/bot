@@ -34,6 +34,21 @@ _SYSTEM_PROMPT_NL_TO_FL = """你是一个群聊记账助手的指令解析器。
 - 简单计算或对话，不涉及数据修改
 - 用户只是确认信息，不需要写入
 
+**查询指令（可选）：**
+如果用户的查询涉及精确的数据检索（如谁欠谁多少、某事件余额），
+你可以在 instructions 中输出一个结构化查询对象，系统会用规则引擎确定计算。
+支持的 query_type：
+  - "debt":  查询债务 params: {debtor(可选), creditor(可选), event(可选)}
+  - "balance": 查询事件余额 params: {event}
+  - "owes": 某人欠谁 params: {person, event(可选)}
+  - "owed_by": 谁欠某人 params: {person, event(可选)}
+
+示例：
+{"intent": "query", "response": "让我帮你查查火锅局的账...",
+ "instructions": [{"query_type": "balance", "params": {"event": "火锅局"}}]}
+
+如果不需要精确计算，可省略 instructions 字段。
+
 **回复要求：**
 - 基于提供的「图数据库上下文」和「群聊上下文」回答
 - 语气自然友好，可以适当使用 emoji

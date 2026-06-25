@@ -1,11 +1,12 @@
-"""主编排器 - 串联所有模块的唯一入口。
+"""主编排器 - 串联所有模块的唯一入口（v2 规则引擎架构）。
 
 数据流：
   1. 有向 NL 到达 → 收集无向窗口 + 图上下文 → LLM 判断 query/action
-  2. query: LLM 直接回答 → 返回群聊消息
-  3. action: LLM 产出 FL 指令 → 执行 → 即刻回复 + 定时回复
+  2. query: 规则引擎后向链查询 → 确定性结果 → LLM 润色 → 返回
+  3. action: LLM 产出 FL → 注入推理引擎前向链 → 收集 ops → 落地执行
 """
 
+import json
 import logging
 from src.graph.base_repo import BaseRepo
 from src.graph.raw_message_repo import RawMessageRepo
@@ -17,19 +18,19 @@ from src.graph.event_repo import EventRepo, EventTriggerType
 from src.graph.action_log_repo import ActionLogRepo
 from src.graph.context_assembler import ContextAssembler
 from src.engine.translator import Translator
-from src.engine.executor import Executor, ActionResult
 from src.engine.event_manager import EventManager
+from src.engine.rule_engine import Fact, Var
+from src.engine.graph_searcher import GraphSearcher
+from src.engine.inference import InferenceEngine
+from src.engine.rules import get_rule_base
 
 logger = logging.getLogger(__name__)
 
 
 class Orchestrator:
-    """流程编排器。
+    """流程编排器 v2。
 
-    调用方式：
-        orch.on_directed_message(content, sender, group_id)     → 处理一条 @bot 消息，立刻返回响应
-        orch.process_scheduled_replies()                         → 检查定时回复，到期则返回消息
-        orch.check_auto_settle()                                 → 检查事件自动结算
+    规则引擎驱动：LLM 负责 NL→FL，推理引擎负责计算。
     """
 
     def __init__(self):
@@ -42,14 +43,19 @@ class Orchestrator:
 
         # engines
         self.translator = Translator()
-        self.executor = Executor()
         self.event_mgr = EventManager()
         self.ctx_assembler = ContextAssembler()
 
-        self._base = BaseRepo()
-        self._last_log_id: str = ""
+        # 规则引擎
+        self.graph_searcher = GraphSearcher()
+        self.rule_base = get_rule_base()
+        self.inference = InferenceEngine(self.rule_base, self.graph_searcher)
 
-    # ── 核心流程：实时消息处理 ─────────────────────────
+        self._base = BaseRepo()
+
+    # ═══════════════════════════════════════════════════
+    # 实时消息处理
+    # ═══════════════════════════════════════════════════
 
     def on_directed_message(
         self,
@@ -61,43 +67,38 @@ class Orchestrator:
 
         流程：
         1. 存储 RawMessage
-        2. 获取时间窗口内的无向 NL
-        3. 查图上下文（context_assembler）
-        4. LLM 翻译（传入：有向 NL + 无向窗口 + 图上下文）
-           → 返回 {intent: "query"|"action", response?, instructions?}
-        5. intent=query → 直接返回 response
-        6. intent=action → 走 _execute_and_persist 链路
-
-        Args:
-            content: 消息内容
-            sender: 发送者
-            group_id: 群号
-
-        Returns:
-            群聊回复消息，空字符串表示无回复
+        2. 收集上下文
+        3. LLM 翻译 → {intent, response?, instructions?}
+        4. query → 后向链查询规则引擎 → 确定性结果 → LLM 润色
+        5. action → 注入前向链 → 收集 ops → 落地执行
         """
         import os
 
         # 1. 存储有向消息
         msg_id = self.raw_msg.create(
-            content=content,
-            sender=sender,
-            group_id=group_id,
-            is_directed=True,
+            content=content, sender=sender, group_id=group_id, is_directed=True,
         )
         logger.info(f"[orchestrator] 收到有向消息 {msg_id}: {sender}: {content}")
 
-        # 2. 获取时间窗口内的无向 NL
-        window_minutes = int(os.getenv("UNDIRECTED_WINDOW_MINUTES", "30"))
-        context = self.raw_msg.list_undirected_window(group_id, window_minutes)
-        context_texts = [m.get("content", "") for m in context]
-        logger.info(f"[orchestrator] 无向窗口: {len(context_texts)} 条消息（{window_minutes}分钟）")
+        # 2. 精简化上下文：区间消息 + 参与者追溯 + 活跃事件列表
+        interval_msgs = self.raw_msg.list_since_last_directed(group_id)
+        # 提取区间参与发言者
+        senders_in_interval = set()
+        for m in interval_msgs:
+            s = m.get("sender", "")
+            if s and s != sender and s != "bot":
+                senders_in_interval.add(s)
+        senders_in_interval.add(sender)
+        # 追溯每个参与者的最近发言
+        sender_traces = self.raw_msg.list_by_senders(group_id, list(senders_in_interval), limit_each=12)
+        # 组装轻量匹配上下文
+        graph_ctx = self.ctx_assembler.assemble_for_event_matching(
+            sender, senders_in_interval, sender_traces,
+        )
+        # 同时保留纯文本上下文给 LLM
+        context_texts = [m.get("content", "") for m in interval_msgs[-30:]]
 
-        # 3. 查图上下文
-        graph_ctx = self.ctx_assembler.assemble(sender, group_id)
-        logger.info(f"[orchestrator] 图上下文长度: {len(graph_ctx)} 字符")
-
-        # 4. LLM 翻译（含意图判断）
+        # 3. LLM 翻译
         result = self.translator.nl_to_fl(content, context_texts, graph_ctx)
         intent = result.get("intent", "query")
         instructions = result.get("instructions")
@@ -105,28 +106,40 @@ class Orchestrator:
 
         logger.info(f"[orchestrator] LLM 判断意图: {intent}")
 
-        # 5. intent=query → 直接返回
+        # ── 4. query 路径 ──
         if intent == "query":
+            # 尝试从 instructions 中提取结构化查询参数
+            if instructions and isinstance(instructions, list) and len(instructions) > 0:
+                query_instr = instructions[0]
+                if isinstance(query_instr, dict) and "query_type" in query_instr:
+                    computed = self._handle_structured_query(query_instr, sender)
+                    if computed:
+                        # 将确定计算结果给 LLM 润色
+                        return self.translator.fl_to_nl({
+                            "op": "computed_answer",
+                            "params": {"sender": sender, "result": computed},
+                        })
+
+            # 纯 LLM 回答
             reply = response or "收到，但我不知道该怎么回复哦 😅"
             logger.info(f"[orchestrator] 查询模式回复: {reply[:80]}...")
             return reply
 
-        # 6. intent=action → 走执行链路
+        # ── 5. action 路径 ──
         if not instructions or not isinstance(instructions, list):
-            logger.warning(f"[orchestrator] action 模式但无有效 instructions")
             return "指令已收到，但无法解析具体操作"
 
-        # 为每条 NL→FL 翻译创建 FL 记录
+        # 创建 FL 记录
         fl_ids = []
         for instr in instructions:
             if not isinstance(instr, dict):
                 continue
             op = instr.get("op", "")
-            if op in ("open_event", "settle_event", "cancel_event"):
-                category = FLCategory.EVENT_MANAGEMENT
-            else:
-                category = FLCategory.GENERAL_INSTRUCTION
-
+            category = (
+                FLCategory.EVENT_MANAGEMENT
+                if op in ("open_event", "settle_event", "cancel_event")
+                else FLCategory.GENERAL_INSTRUCTION
+            )
             fl_id = self.fl_repo.create(
                 payload=instr,
                 source=FLSource.LLM_TRANSLATED,
@@ -136,154 +149,247 @@ class Orchestrator:
             self.fl_repo.link_to_message(fl_id, msg_id)
             fl_ids.append(fl_id)
 
-        # 逐条执行指令并落地，收集即时回复
+        # 逐条执行：注入推理引擎前向链
         immediate_replies = []
         for fl_id, instr in zip(fl_ids, instructions):
             if not isinstance(instr, dict):
                 continue
-            result = self._execute_and_persist(instr, fl_id)
-            if result.message:
-                immediate_replies.append(result.message)
+            reply = self._execute_via_inference(instr, fl_id, msg_id)
+            if reply:
+                immediate_replies.append(reply)
 
-            # 处理行动产出的输出 FL
-            fl_replies = self._handle_output_fls(result, fl_id)
-            immediate_replies.extend(fl_replies)
-
-        # 标记所有已执行的 FL
+        # 标记 FL 已执行
         for fl_id in fl_ids:
             self.fl_repo.update_status(fl_id, FLStatus.EXECUTED)
 
         return "\n".join(immediate_replies) if immediate_replies else "指令已执行"
 
-    def _handle_output_fls(self, result: ActionResult, trigger_fl_id: str) -> list[str]:
-        """处理行动产出的输出 FL，分立即回复和定时回复。"""
-        immediate_messages = []
+    # ═══════════════════════════════════════════════════
+    # 结构化查询处理（query 路径用规则引擎确定计算）
+    # ═══════════════════════════════════════════════════
 
-        for fl_dict in result.output_fls:
-            payload = fl_dict.get("payload", {})
-            reply_type = fl_dict.get("reply_type", "immediate")
-            schedule_at = fl_dict.get("schedule_at")
+    def _handle_structured_query(self, query_instr: dict, sender: str) -> str | None:
+        """用规则引擎后向链处理结构化查询。
 
-            if reply_type == "immediate":
-                if schedule_at:
-                    payload["schedule_at"] = schedule_at
+        LLM 产出 query_type 如: "debt", "balance", "owes", "owed_by"
+        """
+        query_type = query_instr.get("query_type", "")
+        params = query_instr.get("params", {})
 
-                category = FLCategory.OUTPUT_IMMEDIATE
-                status = FLStatus.REPLIED
+        try:
+            if query_type == "debt":
+                debtor = params.get("debtor", sender)
+                creditor = params.get("creditor")
+                event = params.get("event", "")
+                debts = self.inference.query_debt(debtor, creditor, event)
+                if not debts:
+                    return None
+                lines = []
+                for d in debts:
+                    lines.append(f"{d['debtor']} 欠 {d['creditor']}: {d['amount']} 元 (事件: {d['event']})")
+                return "\n".join(lines)
 
-                created_fl_id = self.fl_repo.create(
-                    payload=payload,
-                    source=FLSource.ACTION_GENERATED,
-                    category=category,
-                    parent_log_id=self._last_log_id,
-                    status=status,
-                )
-                if self._last_log_id:
-                    self.fl_repo.link_generated_by(created_fl_id, self._last_log_id)
+            elif query_type == "balance":
+                event = params.get("event", "")
+                bal = self.inference.query_balance(event)
+                if not bal:
+                    return None
+                return json.dumps(bal, ensure_ascii=False)
 
-                nl = self.translator.fl_to_nl(payload)
-                if nl:
-                    immediate_messages.append(nl)
+            elif query_type == "owes":
+                person = params.get("person", sender)
+                event = params.get("event", "")
+                bindings = self.inference.query(Fact("owes", {
+                    "person": person, "event": event,
+                    "counterparty": Var("C"), "amount": Var("X"),
+                }))
+                if not bindings:
+                    return None
+                lines = []
+                for b in bindings:
+                    lines.append(
+                        f"{person} 欠 {b.get(Var('C'))}: {b.get(Var('X'))} 元"
+                    )
+                return "\n".join(lines)
 
-                logger.info(f"[orchestrator] 即刻回复 FL {created_fl_id}")
+            elif query_type == "owed_by":
+                person = params.get("person", sender)
+                event = params.get("event", "")
+                bindings = self.inference.query(Fact("owed_by", {
+                    "person": person, "event": event,
+                    "counterparty": Var("C"), "amount": Var("X"),
+                }))
+                if not bindings:
+                    return None
+                lines = []
+                for b in bindings:
+                    lines.append(
+                        f"{b.get(Var('C'))} 欠 {person}: {b.get(Var('X'))} 元"
+                    )
+                return "\n".join(lines)
 
-            elif reply_type == "scheduled":
-                payload["schedule_at"] = schedule_at or ""
+        except Exception as e:
+            logger.error(f"[orchestrator] 结构化查询失败: {e}", exc_info=True)
 
-                category = FLCategory.OUTPUT_SCHEDULED
-                status = FLStatus.SCHEDULED
+        return None
 
-                created_fl_id = self.fl_repo.create(
-                    payload=payload,
-                    source=FLSource.ACTION_GENERATED,
-                    category=category,
-                    parent_log_id=self._last_log_id,
-                    status=status,
-                )
-                if self._last_log_id:
-                    self.fl_repo.link_generated_by(created_fl_id, self._last_log_id)
+    # ═══════════════════════════════════════════════════
+    # 前向链执行（action 路径）
+    # ═══════════════════════════════════════════════════
 
-                logger.info(f"[orchestrator] 定时回复 FL {created_fl_id}，计划 {schedule_at}")
+    def _execute_via_inference(self, fl_payload: dict, fl_id: str, msg_id: str) -> str:
+        """用推理引擎执行一条 FL 指令。
 
-        return immediate_messages
+        流程：FL → Fact → 前向链 → collect_ops → 落地
+        返回：即时回复文本
+        """
+        op = fl_payload.get("op", "")
+        params = fl_payload.get("params", {})
 
-    def _execute_and_persist(
-        self,
-        fl_payload: dict,
-        fl_id: str,
-    ) -> ActionResult:
-        """执行单条 FL 指令并写入图数据库。"""
-        input_dps: dict[str, dict] = {}
+        # 注入推理引擎：将 FL 包装为 Fact，触发前向链
+        new_fact = Fact(predicate=op, args=params)
+        ops = self.inference.forward_chain(new_fact)
 
-        result = self.executor.execute(fl_payload, input_dps)
+        # 落地所有操作指令，收集即时回复
+        immediate_replies = []
+        log_id = ""  # action_log 可能是由后续 op 创建的
 
-        # 创建 ActionLog
-        log_id = self.log_repo.create(
-            event_id=result.used_event_id,
-            action_summary=result.action_summary,
-        )
-        self._last_log_id = log_id
-        logger.info(f"[orchestrator] 创建行动日志 {log_id}: {result.action_summary}")
+        for op_dict in ops:
+            op_type = op_dict.get("type", "")
 
-        # 链接 FL → Log
-        self.fl_repo.link_triggered_action(fl_id, log_id, result.used_event_id)
+            if op_type == "create_dp":
+                dp_id = self._exec_create_dp(op_dict, fl_id, msg_id, log_id)
+                # 如果有 event_id 且无 log_id，创建一个
+                if not log_id and op_dict.get("event_id"):
+                    log_id = self.log_repo.create(
+                        event_id=op_dict["event_id"],
+                        action_summary=f"{op}: {params}",
+                    )
+                    self.fl_repo.link_triggered_action(fl_id, log_id, op_dict.get("event_id"))
 
-        # 落地数据点
-        output_dp_ids = []
-        for dp_dict in result.output_datapoints:
-            dp_id = dp_dict.pop("dp_id", None)
-            eid = dp_dict.get("event_id") or result.used_event_id
+            elif op_type == "link":
+                self._exec_link(op_dict)
 
-            if result.opened_event:
+            elif op_type == "create_event":
                 event_id = self.event_repo.create(
-                    title=result.opened_event["title"],
-                    created_by=result.opened_event["created_by"],
-                    trigger_type=result.opened_event.get("trigger_type", EventTriggerType.MANUAL),
-                    auto_settle_at=result.opened_event.get("auto_settle_at"),
+                    title=op_dict.get("title", "未命名事件"),
+                    created_by=op_dict.get("created_by", "system"),
+                    trigger_type=op_dict.get("trigger_type", EventTriggerType.MANUAL),
+                    auto_settle_at=op_dict.get("auto_settle_at"),
                 )
-                result.used_event_id = event_id
-                eid = event_id
-                logger.info(f"[orchestrator] 创建事件 {event_id}: {result.opened_event['title']}")
+                logger.info(f"[orchestrator] 创建事件 {event_id}: {op_dict.get('title')}")
 
-            created_dp_id = self.dp_repo.create(
-                dp_type=dp_dict["dp_type"],
-                user_name=dp_dict["user_name"],
-                payload=dp_dict["payload"],
-                event_id=eid,
-                dp_id=dp_id,
-            )
-            output_dp_ids.append(created_dp_id)
+            elif op_type == "settle_event":
+                eid = op_dict.get("event_id", "")
+                if eid:
+                    # 生成结算摘要
+                    dps = self.dp_repo.get_event_datapoints(eid)
+                    dls = self.dp_repo.get_data_lines_for_event(eid)
+                    event = self.event_repo.get(eid) or {}
+                    summary = self.event_mgr.generate_summary(event, dps, dls)
+                    summary_dp_id = self.dp_repo.create(
+                        dp_type="settlement_summary",
+                        user_name="system",
+                        payload=summary,
+                        event_id=eid,
+                    )
+                    self.dp_repo.link_to_event(summary_dp_id, eid)
+                    self.event_repo.settle(eid, summary_dp_id)
+                    immediate_replies.append(
+                        f"📋 事件「{op_dict.get('title', eid)}」已结算！"
+                        f"{len(summary['participants'])} 人参与"
+                    )
 
-            if eid:
-                self.dp_repo.link_to_event(created_dp_id, eid)
-            self.dp_repo.link_produced(log_id, created_dp_id)
+            elif op_type == "cancel_event":
+                eid = op_dict.get("event_id", "")
+                if eid:
+                    self.event_repo.cancel(eid)
+                    immediate_replies.append(f"事件「{eid}」已取消")
 
-            logger.info(f"[orchestrator] 创建数据点 {created_dp_id}: {dp_dict['dp_type']}")
+            elif op_type == "create_fl":
+                payload = op_dict.get("payload", {})
+                reply_type = op_dict.get("reply_type", "immediate")
+                schedule_at = op_dict.get("schedule_at")
 
-        # 落地数据线
-        for from_id, to_id in result.data_lines:
-            if not to_id:
-                continue
-            self.dp_repo.link_data_line(from_id, to_id, log_id, result.used_event_id)
-            logger.info(f"[orchestrator] 创建数据线 {from_id} → {to_id}")
+                if reply_type == "scheduled":
+                    fl_id_created = self.fl_repo.create(
+                        payload=payload,
+                        source=FLSource.ACTION_GENERATED,
+                        category=FLCategory.OUTPUT_SCHEDULED,
+                        status=FLStatus.SCHEDULED,
+                        parent_log_id=log_id,
+                    )
+                else:
+                    fl_id_created = self.fl_repo.create(
+                        payload=payload,
+                        source=FLSource.ACTION_GENERATED,
+                        category=FLCategory.OUTPUT_IMMEDIATE,
+                        status=FLStatus.REPLIED,
+                        parent_log_id=log_id,
+                    )
+                    nl = self.translator.fl_to_nl(payload)
+                    if nl:
+                        immediate_replies.append(nl)
 
-        # 落地被消耗的数据点
-        for dp_id in result.consumed_dp_ids:
-            self.dp_repo.link_consumed(dp_id, log_id)
+                if log_id:
+                    self.fl_repo.link_generated_by(fl_id_created, log_id)
 
-        # 处理事件结算/取消
-        if result.settled_event_id:
-            summary_dp_id = output_dp_ids[0] if output_dp_ids else ""
-            self.event_repo.settle(result.settled_event_id, summary_dp_id)
-            logger.info(f"[orchestrator] 结算事件 {result.settled_event_id}")
+            elif op_type == "action":
+                # 纯计算/副作用 action，已在 ActionHandler 中处理
+                sub_op = op_dict.get("op", "")
+                sub_params = op_dict.get("params", {})
+                logger.info(f"[orchestrator] action 子操作: {sub_op}")
+                # 处理可能由 action 产出的隐式 dp 创建
+                #（已在 ActionHandler 中作为 ops 追加，此处跳过）
 
-        if result.cancelled_event_id:
-            self.event_repo.cancel(result.cancelled_event_id)
-            logger.info(f"[orchestrator] 取消事件 {result.cancelled_event_id}")
+        return "\n".join(immediate_replies) if immediate_replies else ""
 
-        return result
+    def _exec_create_dp(self, op_dict: dict, fl_id: str, msg_id: str, log_id: str) -> str:
+        """落地一个 create_dp 操作。"""
+        dp_type = op_dict.get("dp_type", "unknown")
+        user_name = op_dict.get("user_name", "system")
+        payload = op_dict.get("payload", {})
+        event_id = op_dict.get("event_id")
+        dp_id = op_dict.get("dp_id")
 
-    # ── 定时回复处理 ────────────────────────────────
+        created_id = self.dp_repo.create(
+            dp_type=dp_type,
+            user_name=user_name,
+            payload=payload,
+            event_id=event_id,
+            dp_id=dp_id,
+        )
+
+        # 关联到事件
+        if event_id:
+            self.dp_repo.link_to_event(created_id, event_id)
+
+        # 关联到 ActionLog
+        if log_id:
+            self.dp_repo.link_produced(log_id, created_id)
+
+        logger.info(f"[orchestrator] 创建数据点 {created_id}: {dp_type}")
+        return created_id
+
+    def _exec_link(self, op_dict: dict) -> None:
+        """落地一个 link 操作。"""
+        rel_type = op_dict.get("rel_type", "")
+        from_id = op_dict.get("from_id", "")
+        to_id = op_dict.get("to_id", "")
+
+        if not from_id or not to_id:
+            return
+
+        if rel_type == "BELONGS_TO":
+            self.dp_repo.link_to_event(from_id, to_id)
+        elif rel_type == "DATA_LINE":
+            self.dp_repo.link_data_line(from_id, to_id, "", op_dict.get("event_id"))
+        else:
+            logger.warning(f"[orchestrator] 未知关系类型: {rel_type}")
+
+    # ═══════════════════════════════════════════════════
+    # 定时任务
+    # ═══════════════════════════════════════════════════
 
     def process_scheduled_replies(self) -> list[str]:
         """检查到期的定时回复，翻译为自然语言并返回。"""
@@ -292,45 +398,51 @@ class Orchestrator:
             return []
 
         logger.info(f"[orchestrator] 处理 {len(due)} 条到期定时回复")
-
         messages = []
         for fl in due:
             nl = self.translator.fl_to_nl(fl.get("payload", {}))
             if nl:
                 messages.append(nl)
             self.fl_repo.update_status(fl["id"], FLStatus.REPLIED)
-            logger.info(f"[orchestrator] 定时回复已发送 {fl['id']}")
-
         return messages
 
-    # ── 自动结算检测 ────────────────────────────────
-
     def check_auto_settle(self) -> list[str]:
-        """检查所有活跃事件，对到期的执行自动结算。"""
+        """通过推理引擎前向链检查到期的自动结算。"""
+        ops = self.inference.forward_chain()  # 触发 timed 规则
         messages = []
-        active_events = self.event_repo.list_active()
 
-        for event in active_events:
-            action = self.event_mgr.should_auto_settle(event)
-            if action and action.action == "settle":
-                dps = self.dp_repo.get_event_datapoints(event["id"])
-                dls = self.dp_repo.get_data_lines_for_event(event["id"])
-                summary = self.event_mgr.generate_summary(event, dps, dls)
+        for op_dict in ops:
+            if op_dict.get("type") == "settle_event":
+                eid = op_dict.get("event_id", "")
+                if eid:
+                    try:
+                        dps = self.dp_repo.get_event_datapoints(eid)
+                        dls = self.dp_repo.get_data_lines_for_event(eid)
+                        event = self.event_repo.get(eid) or {}
+                        summary = self.event_mgr.generate_summary(event, dps, dls)
+                        summary_dp_id = self.dp_repo.create(
+                            dp_type="settlement_summary",
+                            user_name="system",
+                            payload=summary,
+                            event_id=eid,
+                        )
+                        self.dp_repo.link_to_event(summary_dp_id, eid)
+                        self.event_repo.settle(eid, summary_dp_id)
+                        messages.append(
+                            f"📋 事件「{event.get('title', eid)}」已自动结算！"
+                            f"共 {summary['total_datapoints']} 个数据点"
+                        )
+                    except Exception as e:
+                        logger.error(f"[orchestrator] 自动结算失败: {e}", exc_info=True)
 
-                summary_dp_id = self.dp_repo.create(
-                    dp_type="settlement_summary",
-                    user_name="system",
-                    payload=summary,
-                    event_id=event["id"],
-                )
-                self.dp_repo.link_to_event(summary_dp_id, event["id"])
-                self.event_repo.settle(event["id"], summary_dp_id)
+            elif op_dict.get("type") == "create_fl":
+                payload = op_dict.get("payload", {})
+                reply_type = op_dict.get("reply_type", "immediate")
+                schedule_at = op_dict.get("schedule_at")
 
-                messages.append(
-                    f"📋 事件「{event['title']}」已自动结算！"
-                    f"共 {summary['total_datapoints']} 个数据点，"
-                    f"{len(summary['participants'])} 人参与"
-                )
-                logger.info(f"[orchestrator] 自动结算事件 {event['id']}: {event['title']}")
+                if reply_type == "immediate":
+                    nl = self.translator.fl_to_nl(payload)
+                    if nl:
+                        messages.append(nl)
 
         return messages

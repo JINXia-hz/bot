@@ -94,19 +94,13 @@ class Scheduler:
             logger.error(f"[scheduler] 清理无向消息出错: {e}", exc_info=True)
 
     async def _job_check_auto_settle(self, group_id: str) -> None:
-        """定时任务：检查事件自动结算。"""
+        """定时任务：检查事件自动结算（由推理引擎前向链驱动）。"""
         try:
             settle_msgs = self.orchestrator.check_auto_settle()
             if settle_msgs:
-                logger.info(f"[scheduler] 自动结算: {settle_msgs}")
-                from src.graph.formal_language_repo import FLSource, FLCategory, FLStatus
+                logger.info(f"[scheduler] 自动结算消息: {len(settle_msgs)} 条")
                 for msg in settle_msgs:
-                    self.orchestrator.fl_repo.create(
-                        payload={"message": msg},
-                        source=FLSource.ACTION_GENERATED,
-                        category=FLCategory.OUTPUT_IMMEDIATE,
-                        status=FLStatus.REPLIED,
-                    )
+                    logger.info(f"[scheduler] 结算: {msg[:100]}...")
         except Exception as e:
             logger.error(f"[scheduler] 自动结算检查出错: {e}", exc_info=True)
 

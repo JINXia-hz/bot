@@ -77,6 +77,73 @@ class RawMessageRepo(BaseRepo):
             messages.append(dict(row[0]))
         return messages
 
+    def list_since_last_directed(self, group_id: str) -> list[dict]:
+        """获取从上一条有向消息到现在的所有消息。
+
+        用于上下文精简化：只取两个 @bot 之间的"新对话"。
+
+        Returns:
+            按时间正序的消息列表
+        """
+        from datetime import datetime, timedelta, timezone
+
+        # 先找最近一条有向消息（不含当前这条）
+        result = self.execute("""
+            MATCH (m:RawMessage)
+            WHERE m.group_id = $gid AND m.is_directed = true
+            RETURN m.timestamp
+            ORDER BY m.timestamp DESC
+            LIMIT 2
+        """, {"gid": group_id})
+
+        timestamps = []
+        while result.has_next():
+            timestamps.append(result.get_next()[0])
+
+        if len(timestamps) < 2:
+            # 没有上一条有向消息，取最近 15 分钟
+            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+        else:
+            cutoff = timestamps[1]  # 上一条有向消息的时间
+
+        result2 = self.execute("""
+            MATCH (m:RawMessage)
+            WHERE m.group_id = $gid AND m.timestamp >= $cutoff
+            RETURN m
+            ORDER BY m.timestamp ASC
+        """, {"gid": group_id, "cutoff": cutoff})
+
+        messages = []
+        while result2.has_next():
+            messages.append(dict(result2.get_next()[0]))
+        return messages
+
+    def list_by_senders(self, group_id: str, senders: list[str],
+                        limit_each: int = 15) -> dict[str, list[dict]]:
+        """按发言者分别追溯最近 N 条消息。
+
+        用于上下文精简化：了解每个参与者的最近发言动向。
+
+        Returns:
+            {sender_name: [msg_dict, ...]}
+        """
+        result_map: dict[str, list[dict]] = {}
+        for sender in senders:
+            if not sender:
+                continue
+            r = self.execute("""
+                MATCH (m:RawMessage)
+                WHERE m.group_id = $gid AND m.sender = $sender
+                RETURN m
+                ORDER BY m.timestamp DESC
+                LIMIT $limit
+            """, {"gid": group_id, "sender": sender, "limit": limit_each})
+            msgs = []
+            while r.has_next():
+                msgs.append(dict(r.get_next()[0]))
+            result_map[sender] = list(reversed(msgs))
+        return result_map
+
     def cleanup_old_undirected(self, retention_minutes: int = 60) -> int:
         """清理超过保留时间的无向消息。
 

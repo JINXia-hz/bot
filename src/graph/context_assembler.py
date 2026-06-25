@@ -23,6 +23,60 @@ class ContextAssembler:
     def __init__(self, conn: Connection | None = None):
         self.conn = conn or get_connection()
 
+    def assemble_for_event_matching(
+        self, sender: str, senders: set[str],
+        sender_traces: dict[str, list[dict]],
+    ) -> str:
+        """组装轻量上下文，仅用于 LLM 匹配活跃事件。
+
+        与 assemble() 不同：不发全量数据，只发"谁最近说了什么 + 活跃事件列表"。
+
+        Args:
+            sender: 当前 @bot 的人
+            senders: 区间内所有发言者
+            sender_traces: {发言人: [最近消息], ...}
+        """
+        parts = []
+
+        # 参与者最近发言
+        trace_lines = []
+        for person in sorted(senders):
+            msgs = sender_traces.get(person, [])
+            if not msgs:
+                continue
+            short = [m.get("content", "")[:60] for m in msgs[-3:]]  # 每人最多 3 条
+            trace_lines.append(f"- {person}: {' | '.join(short)}")
+        if trace_lines:
+            parts.append(f"[参与者最近发言]\n" + "\n".join(trace_lines))
+
+        # 活跃事件列表（轻量）
+        ev_lines = self._active_events_light()
+        if ev_lines:
+            parts.append(f"[活跃事件]\n" + "\n".join(ev_lines))
+
+        return "\n\n".join(parts) if parts else "（无上下文）"
+
+    def _active_events_light(self) -> list[str]:
+        """活跃事件简要列表：仅 title + id + 参与者。
+
+        Returns:
+            如 ["- id:e1 火锅局(参与者:张三/李四)", ...]
+        """
+        result = self.conn.execute("""
+            MATCH (e:Event {status: "active"})
+            MATCH (dp:DataPoint)-[:BELONGS_TO]->(e)
+            WITH e, COLLECT(DISTINCT dp.user_name) AS users
+            RETURN e.id, e.title, users
+            ORDER BY e.created_at DESC
+            LIMIT 10
+        """)
+        lines = []
+        while result.has_next():
+            eid, title, users = result.get_next()
+            participants_str = "/".join(users) if users else "无"
+            lines.append(f"- id:{eid} {title}(参与者:{participants_str})")
+        return lines
+
     def assemble(self, user_name: str, group_id: str) -> str:
         """为主叫用户组装完整图上下文，返回格式化文本。
 
