@@ -9,9 +9,12 @@ import shutil
 import tempfile
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from src.graph.connection import close_connection, init_database
 from src.pipeline.orchestrator import Orchestrator
+from src.web.admin import router as admin_router
 
 
 class MockTranslator:
@@ -241,6 +244,93 @@ class TestOpenEventAndRecordExpense:
         assert debts[0]["payload"]["creditor"] == "理静"
         assert debts[0]["payload"]["amount"] == 50
 
+    def test_action_key_alias_still_creates_event(self, orchestrator):
+        """LLM 把指令键写成 'action' 而不是 'op' 时，系统应兼容并正常创建事件。"""
+        orch, mock = orchestrator
+
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "action": "open_event",
+                "params": {"title": "午餐", "created_by": "理静"},
+            }],
+        }])
+        reply = orch.on_directed_message("@bot 开启一个午餐事件", "理静", "g1")
+
+        events = orch.event_repo.list_active()
+        assert len(events) == 1, f"应创建 1 个活跃事件，实际 {len(events)}"
+        assert events[0]["title"] == "午餐"
+
+    def test_textual_mention_added_as_participant(self, orchestrator):
+        """消息中 @昵称 的文本 mention 应被识别为参与者并参与 AA 计算。"""
+        orch, mock = orchestrator
+
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "op": "open_event",
+                "params": {"title": "午餐", "created_by": "理静"},
+            }],
+        }])
+        orch.on_directed_message("@bot 开启一个午餐事件，@陈哲渊 是参与者", "理静", "g1", mentions=["陈哲渊"])
+
+        event = orch.event_repo.list_active()[0]
+        participants = orch.inference.searcher.execute("event_participants", {"event_id": event["id"]})
+        assert set(participants) == {"理静", "陈哲渊"}
+
+        # 理静付 100，应生成 2 人 AA，陈哲渊欠理静 50
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "op": "record_expense",
+                "params": {"user_name": "理静", "amount": 100, "category": "餐饮", "note": "午餐"},
+            }],
+        }])
+        orch.on_directed_message("@bot 我付了100午餐", "理静", "g1", mentions=["陈哲渊"])
+
+        dps = orch.dp_repo.get_event_datapoints(event["id"])
+        debts = [dp for dp in dps if dp["dp_type"] == "debt"]
+        assert len(debts) == 1
+        assert debts[0]["payload"]["debtor"] == "陈哲渊"
+        assert debts[0]["payload"]["creditor"] == "理静"
+        assert debts[0]["payload"]["amount"] == 50
+
+    def test_active_events_visible_in_web_admin(self, orchestrator):
+        """Orchestrator 创建的事件和数据点应能通过 web admin API 读取。"""
+        orch, mock = orchestrator
+
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "op": "open_event",
+                "params": {"title": "午餐", "created_by": "理静"},
+            }],
+        }])
+        orch.on_directed_message("@bot 开启午餐事件", "理静", "g1")
+
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "op": "record_expense",
+                "params": {"user_name": "理静", "amount": 100, "category": "餐饮", "note": "午餐"},
+            }],
+        }])
+        orch.on_directed_message("@bot 我付了100午餐", "理静", "g1")
+
+        app = FastAPI()
+        app.include_router(admin_router)
+        client = TestClient(app)
+
+        r = client.get("/admin/api/stats")
+        assert r.status_code == 200
+        stats = r.json()
+        assert stats["active_events"] >= 1
+        assert stats["counts"]["datapoints"] >= 2
+
+        r = client.get("/admin/api/events")
+        assert r.status_code == 200
+        assert any(e["title"] == "午餐" for e in r.json())
+
 
 class TestRepayScenario:
     """场景：已有债务 → 还款 → 生成 debt_settled/residual。"""
@@ -324,3 +414,50 @@ class TestNoEventRecordExpense:
         assert len(expenses) == 1
         assert expenses[0]["payload"]["amount"] == 20
         assert expenses[0]["event_id"] == ""
+
+
+class TestWebAdminIntegration:
+    """验证 bot 写入的数据能被 web 管理后台正确读取。"""
+
+    def test_web_admin_sees_orchestrator_data(self, orchestrator):
+        orch, mock = orchestrator
+
+        # 通过 orchestrator 创建事件和数据点
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "op": "open_event",
+                "params": {"title": "火锅局", "created_by": "张三"},
+            }],
+        }])
+        orch.on_directed_message("@bot 开火锅局", "张三", "g1")
+
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "op": "record_expense",
+                "params": {"user_name": "张三", "amount": 150, "category": "餐饮", "note": "火锅局"},
+            }],
+        }])
+        orch.on_directed_message("@bot 我付150", "张三", "g1")
+
+        # 用 web admin API 查询（使用真实 get_connection，不 mock）
+        app = FastAPI()
+        app.include_router(admin_router)
+        client = TestClient(app)
+
+        r = client.get("/admin/api/stats")
+        assert r.status_code == 200
+        stats = r.json()
+        assert stats["counts"]["events"] >= 1
+        assert stats["counts"]["datapoints"] >= 2
+
+        r = client.get("/admin/api/events")
+        assert r.status_code == 200
+        events = r.json()
+        assert any(e["title"] == "火锅局" for e in events)
+
+        r = client.get("/admin/api/datapoints")
+        assert r.status_code == 200
+        dps = r.json()
+        assert any(dp["dp_type"] == "expense" and dp["payload"].get("amount") == 150 for dp in dps)

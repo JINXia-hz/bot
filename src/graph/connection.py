@@ -3,9 +3,21 @@
 提供单例模式的数据库连接，确保整个应用使用同一个 kuzu 实例。
 """
 
+import logging
 import os
 from pathlib import Path
 from kuzu import Connection, Database
+
+# 确保无论从哪个入口启动，.env 都能被加载到 os.environ
+# bot.py 也会加载，此处作为兜底，避免 nb run 等入口遗漏
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    if _env_path.exists():
+        # override=True 确保 .env 中的值优先于已存在的环境变量
+        load_dotenv(dotenv_path=_env_path, override=True)
+except Exception:
+    pass
 
 
 _db: Database | None = None
@@ -18,7 +30,7 @@ def get_db_path() -> Path:
     从环境变量 KUZU_DB_PATH 读取，默认为 data/bot.kuzu。
     会相对于项目根目录解析。
     """
-    env_path = os.getenv("KUZU_DB_PATH", "data/bot.kuzu")
+    env_path = os.getenv("KUZU_DB_PATH") or "data/bot.kuzu"
     # 项目根目录：src/graph/connection.py → src/graph → src → 根
     base = Path(__file__).resolve().parent.parent.parent
     return base / env_path
@@ -37,6 +49,8 @@ def get_connection() -> Connection:
     if _conn is None:
         # 使用绝对路径，避免相对路径在部分环境下解析异常
         db_path = get_db_path().resolve()
+        logger_db = logging.getLogger("bot.db")
+        logger_db.info(f"[db] 使用数据库路径: {db_path}")
         db_dir = db_path.parent
 
         # 确保父目录存在；kuzu 不会自动创建缺失的目录

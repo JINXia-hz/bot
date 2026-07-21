@@ -58,6 +58,12 @@ _SYSTEM_PROMPT_NL_TO_FL = """你是一个群聊记账助手的指令解析器。
 ### action（执行指令）
 当用户消息需要修改数据时，intent 设为 "action"，在 instructions 数组中输出格式语言指令。
 
+**instructions 数组中每个元素必须是如下格式，严禁使用 `"action"` 作为键名：**
+```json
+{"op": "open_event", "params": {"title": "午餐", "auto_settle_at": null}}
+{"op": "record_expense", "params": {"user_name": "张三", "amount": 100, "category": "餐饮", "note": "午餐"}}
+```
+
 ## 支持的操作类型（仅 action 模式）
 
 ### event_management（事件管理）

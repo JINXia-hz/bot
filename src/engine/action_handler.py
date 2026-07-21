@@ -389,6 +389,34 @@ class ActionHandler:
     # 参与者自动补入
     # ═══════════════════════════════════════════════
 
+    def _h_ensure_participants_in_event(self, params: dict, binding: Binding) -> tuple[bool, Binding | None]:
+        """批量确保多个用户作为参与者加入事件。
+
+        params: {people, event_id, title}
+        """
+        people = params.get("people", [])
+        event_id = params.get("event_id", "")
+        event_title = params.get("title", "")
+
+        if not isinstance(people, list):
+            people = []
+
+        for person in people:
+            if not isinstance(person, str) or not person:
+                continue
+            from src.graph.base_repo import _new_id
+            dp_id = _new_id()
+            self.engine._ops.append({
+                "type": "create_dp",
+                "dp_type": "participant_entry",
+                "dp_id": dp_id,
+                "user_name": person,
+                "payload": {"event_title": event_title, "role": "participant"},
+                "event_id": event_id,
+            })
+
+        return True, binding
+
     def _h_ensure_user_in_event(self, params: dict, binding: Binding) -> tuple[bool, Binding | None]:
         """检查用户是否在事件中，不在则创建 participant_entry dp。
 

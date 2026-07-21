@@ -109,6 +109,8 @@ class Orchestrator:
         response = result.get("response")
 
         logger.info(f"[orchestrator] LLM 判断意图: {intent}")
+        if instructions:
+            logger.info(f"[orchestrator] LLM 指令: {instructions}")
 
         # ── 4. query 路径 ──
         if intent == "query":
@@ -133,11 +135,23 @@ class Orchestrator:
         if not instructions or not isinstance(instructions, list):
             return "指令已收到，但无法解析具体操作"
 
-        # 创建 FL 记录
-        fl_ids = []
+        # 规范化 LLM 产出的指令格式（兼容模型把键写成 "action" 的情况）
+        normalized_instructions = []
         for instr in instructions:
             if not isinstance(instr, dict):
                 continue
+            if "op" not in instr and "action" in instr:
+                logger.warning(f"[orchestrator] LLM 指令使用了 'action' 键，自动转为 'op': {instr}")
+                instr = {"op": instr["action"], "params": instr.get("params", {})}
+            normalized_instructions.append(instr)
+        instructions = normalized_instructions
+
+        if not instructions:
+            return "指令已收到，但无法解析具体操作"
+
+        # 创建 FL 记录
+        fl_ids = []
+        for instr in instructions:
             op = instr.get("op", "")
             category = (
                 FLCategory.EVENT_MANAGEMENT
@@ -282,6 +296,7 @@ class Orchestrator:
         # 注入推理引擎：将 FL 包装为 Fact，触发前向链
         new_fact = Fact(predicate=op, args=params)
         ops = self.inference.forward_chain(new_fact)
+        logger.info(f"[orchestrator] 前向链返回 {len(ops)} 个操作: {[o.get('type') for o in ops]}")
 
         # 落地所有操作指令，收集即时回复
         immediate_replies = []

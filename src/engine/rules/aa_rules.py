@@ -142,6 +142,37 @@ def register(rb) -> None:
     ))
 
     # ═══════════════════════════════════════════════
+    # 前向链：AA 分摊（split_bill）
+    # ═══════════════════════════════════════════════
+
+    rb.register(Rule(
+        name="split_bill_setup",
+        triggers=[
+            Clause.action("split_bill", {
+                "user_name": Var("U"),
+                "title": Var("T"),
+                "total": Var("Tot"),
+                "people": Var("PP"),
+            }),
+        ],
+        conclusion=Fact("bill_set_up", {
+            "event_id": Var("E"),
+            "title": Var("T"),
+        }),
+        conditions=[
+            # 1. 找到对应事件
+            Clause.graph("find_event_like", {"title": Var("T")}, Var("Ev")),
+            Clause.resolve(Var("Ev"), "id", Var("E")),
+            # 2. 创建总账单数据点（参与者由 orchestrator 通过 mentions 统一加入）
+            Clause.create_dp("bill_item", {
+                "user_name": Var("U"),
+                "payload": {"bill_title": Var("T"), "total": Var("Tot"), "people": Var("PP")},
+                "event_id": Var("E"),
+            }, Var("BP")),
+        ],
+    ))
+
+    # ═══════════════════════════════════════════════
     # 前向链：穿透还款（跨事件，溢出填补）
     # ═══════════════════════════════════════════════
 
