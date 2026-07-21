@@ -186,6 +186,61 @@ class TestOpenEventAndRecordExpense:
         assert isinstance(events[0]["auto_settle_at"], datetime)
         assert events[0]["auto_settle_at"].isoformat().startswith("2026-12-31")
 
+    def test_mentions_are_added_as_participants(self, orchestrator):
+        """消息中 @ 的人应被自动加入事件参与者。"""
+        orch, mock = orchestrator
+
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "op": "open_event",
+                "params": {"title": "早饭", "created_by": "理静"},
+            }],
+        }])
+        orch.on_directed_message("@bot 我和 @1466626219 一起吃早饭", "理静", "g1", mentions=["1466626219"])
+
+        event = orch.event_repo.list_active()[0]
+        participants = orch.inference.searcher.execute("event_participants", {"event_id": event["id"]})
+        assert "理静" in participants
+        assert "1466626219" in participants
+
+    def test_mentions_split_bill(self, orchestrator):
+        """@ 多人后记账，应自动按参与者分摊并生成债务。"""
+        orch, mock = orchestrator
+
+        # 开事件并 @ 一个参与者
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "op": "open_event",
+                "params": {"title": "早饭", "created_by": "理静"},
+            }],
+        }])
+        orch.on_directed_message("@bot 我和 @1466626219 一起吃早饭", "理静", "g1", mentions=["1466626219"])
+
+        event = orch.event_repo.list_active()[0]
+
+        # 理静付 100
+        mock.set_responses([{
+            "intent": "action",
+            "instructions": [{
+                "op": "record_expense",
+                "params": {"user_name": "理静", "amount": 100, "category": "餐饮", "note": "早饭"},
+            }],
+        }])
+        orch.on_directed_message("@bot 我付了100早饭", "理静", "g1", mentions=["1466626219"])
+
+        # 应生成 2 个参与者，人均 50，1466626219 欠理静 50
+        participants = orch.inference.searcher.execute("event_participants", {"event_id": event["id"]})
+        assert set(participants) == {"理静", "1466626219"}
+
+        dps = orch.dp_repo.get_event_datapoints(event["id"])
+        debts = [dp for dp in dps if dp["dp_type"] == "debt"]
+        assert len(debts) == 1
+        assert debts[0]["payload"]["debtor"] == "1466626219"
+        assert debts[0]["payload"]["creditor"] == "理静"
+        assert debts[0]["payload"]["amount"] == 50
+
 
 class TestRepayScenario:
     """场景：已有债务 → 还款 → 生成 debt_settled/residual。"""

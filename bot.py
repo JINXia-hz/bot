@@ -21,6 +21,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot")
 
+# 显式加载 .env，确保 os.getenv 能读到配置（NoneBot2 不把 .env 注入 os.environ）
+from dotenv import load_dotenv
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path, override=True)
+    logger.info(f"[bot] 已加载环境变量: {env_path}")
+else:
+    logger.warning(f"[bot] 未找到 .env 文件: {env_path}")
+
 # NoneBot2 初始化
 nonebot.init()
 

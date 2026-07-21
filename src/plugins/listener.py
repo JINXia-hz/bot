@@ -34,6 +34,24 @@ async def _is_at_bot(event: GroupMessageEvent) -> bool:
     return msg.startswith("@bot")
 
 
+def _extract_mentions(event: GroupMessageEvent, bot_self_id: int | None = None) -> list[str]:
+    """提取消息中 @ 的用户（排除 bot 自己）。
+
+    OneBot V11 的 at segment 中只有 qq 号，因此用 qq 号作为用户标识。
+    """
+    mentions = []
+    for seg in event.get_message():
+        if seg.type == "at":
+            qq = seg.data.get("qq")
+            if qq is None:
+                continue
+            qq_str = str(qq)
+            if bot_self_id is not None and qq_str == str(bot_self_id):
+                continue
+            mentions.append(qq_str)
+    return mentions
+
+
 # 所有群消息监听器
 all_messages = on_message(rule=Rule(lambda event: True), priority=100, block=False)
 
@@ -55,6 +73,7 @@ async def handle_all_messages(bot: Bot, event: GroupMessageEvent):
     sender = event.sender.nickname or str(event.user_id)
     group_id = str(event.group_id)
     is_directed = await _is_at_bot(event)
+    mentions = _extract_mentions(event, bot_self_id=bot.self_id)
 
     # 存储到图数据库
     repo = RawMessageRepo()
@@ -65,12 +84,12 @@ async def handle_all_messages(bot: Bot, event: GroupMessageEvent):
         is_directed=is_directed,
     )
 
-    logger.debug(f"[listener] {'有向' if is_directed else '无向'}消息: {sender}: {raw_msg[:50]}")
+    logger.debug(f"[listener] {'有向' if is_directed else '无向'}消息: {sender}: {raw_msg[:50]} mentions={mentions}")
 
     # 有向消息：触发处理
     if is_directed and _orchestrator:
         try:
-            response = _orchestrator.on_directed_message(raw_msg, sender, group_id)
+            response = _orchestrator.on_directed_message(raw_msg, sender, group_id, mentions=mentions)
             if response:
                 await bot.send(event, response)
         except Exception as e:

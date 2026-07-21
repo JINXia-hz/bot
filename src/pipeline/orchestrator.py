@@ -62,15 +62,19 @@ class Orchestrator:
         content: str,
         sender: str,
         group_id: str,
+        mentions: list[str] | None = None,
     ) -> str:
         """处理一条 @bot 的有向消息。
 
         流程：
-        1. 存储 RawMessage
-        2. 收集上下文
-        3. LLM 翻译 → {intent, response?, instructions?}
-        4. query → 后向链查询规则引擎 → 确定性结果 → LLM 润色
-        5. action → 注入前向链 → 收集 ops → 落地执行
+          1. 存储 RawMessage
+          2. 收集上下文
+          3. LLM 翻译 → {intent, response?, instructions?}
+          4. query → 后向链查询规则引擎 → 确定性结果 → LLM 润色
+          5. action → 注入前向链 → 收集 ops → 落地执行
+
+        Args:
+            mentions: 消息中 @ 的用户列表（qq 号），用于自动加入事件参与者。
         """
         import os
 
@@ -154,7 +158,7 @@ class Orchestrator:
         for fl_id, instr in zip(fl_ids, instructions):
             if not isinstance(instr, dict):
                 continue
-            reply = self._execute_via_inference(instr, fl_id, msg_id)
+            reply = self._execute_via_inference(instr, fl_id, msg_id, mentions=mentions)
             if reply:
                 immediate_replies.append(reply)
 
@@ -237,7 +241,13 @@ class Orchestrator:
     # 前向链执行（action 路径）
     # ═══════════════════════════════════════════════════
 
-    def _execute_via_inference(self, fl_payload: dict, fl_id: str, msg_id: str) -> str:
+    def _execute_via_inference(
+        self,
+        fl_payload: dict,
+        fl_id: str,
+        msg_id: str,
+        mentions: list[str] | None = None,
+    ) -> str:
         """用推理引擎执行一条 FL 指令。
 
         流程：FL → Fact → 前向链 → collect_ops → 落地
@@ -245,6 +255,7 @@ class Orchestrator:
         """
         import re
 
+        mentions = mentions or []
         op = fl_payload.get("op", "")
         params = dict(fl_payload.get("params", {}))
 
@@ -281,26 +292,39 @@ class Orchestrator:
 
             if op_type == "create_dp":
                 dp_id = self._exec_create_dp(op_dict, fl_id, msg_id, log_id)
+                event_id = op_dict.get("event_id")
                 # 如果有 event_id 且无 log_id，创建一个
-                if not log_id and op_dict.get("event_id"):
+                if not log_id and event_id:
                     log_id = self.log_repo.create(
-                        event_id=op_dict["event_id"],
+                        event_id=event_id,
                         action_summary=f"{op}: {params}",
                     )
-                    self.fl_repo.link_triggered_action(fl_id, log_id, op_dict.get("event_id"))
+                    self.fl_repo.link_triggered_action(fl_id, log_id, event_id)
+                # 记账时，把消息中 @ 的人也加入事件参与者
+                if event_id and op_dict.get("dp_type") == "expense":
+                    event = self.event_repo.get(event_id) or {}
+                    for m in mentions:
+                        self._ensure_participant_in_event(m, event_id, event.get("title", ""))
 
             elif op_type == "link":
                 self._exec_link(op_dict)
 
             elif op_type == "create_event":
+                created_by = op_dict.get("created_by", "system")
+                event_title = op_dict.get("title", "未命名事件")
                 event_id = self.event_repo.create(
-                    title=op_dict.get("title", "未命名事件"),
-                    created_by=op_dict.get("created_by", "system"),
+                    title=event_title,
+                    created_by=created_by,
                     trigger_type=op_dict.get("trigger_type", EventTriggerType.MANUAL),
                     auto_settle_at=op_dict.get("auto_settle_at"),
                     event_id=op_dict.get("event_id"),
                 )
-                logger.info(f"[orchestrator] 创建事件 {event_id}: {op_dict.get('title')}")
+                logger.info(f"[orchestrator] 创建事件 {event_id}: {event_title}")
+                # 创建者也作为参与者加入
+                self._ensure_participant_in_event(created_by, event_id, event_title)
+                # 把消息中 @ 的人自动加入事件参与者
+                for m in mentions:
+                    self._ensure_participant_in_event(m, event_id, event_title)
 
             elif op_type == "settle_event":
                 eid = op_dict.get("event_id", "")
@@ -409,6 +433,25 @@ class Orchestrator:
             self.dp_repo.link_data_line(from_id, to_id, "", op_dict.get("event_id"))
         else:
             logger.warning(f"[orchestrator] 未知关系类型: {rel_type}")
+
+    def _ensure_participant_in_event(self, user_name: str, event_id: str, event_title: str) -> None:
+        """确保某用户作为 participant_entry 加入事件（幂等）。"""
+        if not user_name or not event_id:
+            return
+        existing = self.inference.searcher.execute("user_in_event", {
+            "user_name": user_name,
+            "event_id": event_id,
+        })
+        if existing:
+            return
+        dp_id = self.dp_repo.create(
+            dp_type="participant_entry",
+            user_name=user_name,
+            payload={"event_title": event_title, "role": "participant"},
+            event_id=event_id,
+        )
+        self.dp_repo.link_to_event(dp_id, event_id)
+        logger.info(f"[orchestrator] 将 {user_name} 加入事件 {event_id}")
 
     # ═══════════════════════════════════════════════════
     # 定时任务
