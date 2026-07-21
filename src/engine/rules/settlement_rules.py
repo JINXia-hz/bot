@@ -36,6 +36,31 @@ def register(rb) -> None:
         ],
     ))
 
+    # ── 前向链：LLM 指令开启事件 ─────────────────────────
+
+    rb.register(Rule(
+        name="manual_open_event",
+        triggers=[
+            Clause.action("open_event", {
+                "title": Var("T"),
+                "auto_settle_at": Var("AT"),
+                "created_by": Var("U"),
+            }),
+        ],
+        conclusion=Fact("event_opened", {
+            "event_id": Var("E"),
+            "title": Var("T"),
+        }),
+        conditions=[
+            Clause.action("open_event", {
+                "title": Var("T"),
+                "created_by": Var("U"),
+                "auto_settle_at": Var("AT"),
+                "result": Var("E"),
+            }),
+        ],
+    ))
+
     # ── 前向链：LLM 指令结算 ─────────────────────────
 
     rb.register(Rule(

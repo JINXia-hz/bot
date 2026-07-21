@@ -78,9 +78,20 @@ class Binding:
             return self.mapping.get(var_or_value, var_or_value)
         return var_or_value
 
-    def resolve(self, data: dict[str, Any]) -> dict[str, Any]:
-        """将 dict 中的所有 Var 替换为绑定值。"""
-        return {k: self.get(v) for k, v in data.items()}
+    def resolve(self, data: Any) -> Any:
+        """递归将数据结构中的所有 Var 替换为绑定值。
+
+        支持 dict、list、tuple 以及嵌套组合。
+        """
+        if isinstance(data, Var):
+            return self.get(data)
+        if isinstance(data, dict):
+            return {k: self.resolve(v) for k, v in data.items()}
+        if isinstance(data, list):
+            return [self.resolve(item) for item in data]
+        if isinstance(data, tuple):
+            return tuple(self.resolve(item) for item in data)
+        return data
 
     def extend(self, var: Var, value: Any) -> "Binding | None":
         """返回新 Binding。若已有不同绑定则返回 None（统一失败）。"""

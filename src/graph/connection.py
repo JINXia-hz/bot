@@ -35,10 +35,28 @@ def get_connection() -> Connection:
     """
     global _db, _conn
     if _conn is None:
-        db_path = get_db_path()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        _db = Database(str(db_path))
-        _conn = Connection(_db)
+        # 使用绝对路径，避免相对路径在部分环境下解析异常
+        db_path = get_db_path().resolve()
+        db_dir = db_path.parent
+
+        # 确保父目录存在；kuzu 不会自动创建缺失的目录
+        if not db_dir.exists():
+            db_dir.mkdir(parents=True, exist_ok=True)
+        if not db_dir.exists():
+            raise RuntimeError(f"无法创建数据库目录: {db_dir}")
+
+        try:
+            _db = Database(str(db_path))
+            _conn = Connection(_db)
+        except RuntimeError as e:
+            # 中文/特殊字符路径在部分 kuzu 版本下会触发 IO 异常
+            if not str(db_path).isascii():
+                raise RuntimeError(
+                    f"无法打开 kuzu 数据库: {db_path}\n"
+                    "路径包含中文或特殊字符，请在 .env 中将 KUZU_DB_PATH "
+                    "设置为纯英文绝对路径（例如 D:/kuzu_data/bot.kuzu）。"
+                ) from e
+            raise
     return _conn
 
 

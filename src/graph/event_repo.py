@@ -1,5 +1,8 @@
 """Event Repository - 事件（管理容器）的存取与生命周期管理。"""
 
+from datetime import datetime
+from typing import Any
+
 from src.graph.base_repo import BaseRepo
 
 
@@ -37,7 +40,12 @@ class EventRepo(BaseRepo):
         """
         eid = event_id or self.new_id()
         now = self.now()
-        auto_val = auto_settle_at if auto_settle_at else now
+        if auto_settle_at:
+            auto_val = self._parse_time(auto_settle_at)
+        else:
+            # 未指定自动结算时间时，默认 24 小时后，避免事件刚创建就被结算
+            from datetime import timedelta
+            auto_val = now + timedelta(hours=24)
         self.execute("""
             CREATE (e:Event {
                 id: $id,
@@ -99,6 +107,20 @@ class EventRepo(BaseRepo):
             "status": EventStatus.CANCELLED,
             "now": now,
         })
+
+    @staticmethod
+    def _parse_time(value: Any) -> datetime:
+        """将字符串或 datetime 统一解析为 datetime。"""
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            from datetime import datetime as _dt
+            # 尝试解析 ISO 格式，并统一为 offset-naive datetime
+            parsed = _dt.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.replace(tzinfo=None)
+            return parsed
+        raise TypeError(f"不支持的时间类型: {type(value)}")
 
     # ── 查询 ────────────────────────────────────
 

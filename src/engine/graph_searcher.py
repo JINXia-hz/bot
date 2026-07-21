@@ -198,6 +198,9 @@ class GraphSearcher:
     def _q_event_participants(self, params: dict) -> list[str]:
         """查询某事件的所有参与者（去重）。
 
+        只统计人类参与者的数据点（支出/收入/参与者登记），
+        排除系统生成的 balance、debt、settlement_summary 等。
+
         query_name: event_participants
         params: {event_id: str}
         returns: ["张三", "李四", ...]
@@ -207,6 +210,7 @@ class GraphSearcher:
             return []
         result = self.conn.execute("""
             MATCH (dp:DataPoint)-[:BELONGS_TO]->(e:Event {id: $eid})
+            WHERE dp.dp_type IN ['expense', 'income', 'participant_entry']
             RETURN DISTINCT dp.user_name
         """, {"eid": eid})
         users = []

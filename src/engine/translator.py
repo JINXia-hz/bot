@@ -71,6 +71,10 @@ _SYSTEM_PROMPT_NL_TO_FL = """你是一个群聊记账助手的指令解析器。
 ### general_instruction（一般指令）
 - record_expense: 记支出
   params: {user_name, amount, category, note}
+  注意：
+  - amount 必须从用户消息中提取数字金额，必填。
+  - category 是支出类别（如 餐饮、交通、娱乐），如无法判断填"其他"。
+  - note 用于匹配事件，应包含事件关键词（如"火锅局""晚上吃饭"），不要用"title"字段。
 - record_income: 记收入
   params: {user_name, amount, note}
 - split_bill: 发起 AA

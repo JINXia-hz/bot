@@ -42,15 +42,13 @@ def register(rb) -> None:
                 "event_id": Var("E"),
                 "event_title": Var("N"),
             }),
-            # 2. 创建 expense 数据点
+            # 2. 创建 expense 数据点（BELONGS_TO 由 Orchestrator 落地时统一建立）
             Clause.create_dp("expense", {
                 "user_name": Var("U"),
                 "payload": {"amount": Var("A"), "category": Var("C"), "note": Var("N")},
                 "event_id": Var("E"),
             }, Var("DP1")),
-            # 3. 关联事件
-            Clause.link("BELONGS_TO", Var("DP1"), Var("E")),
-            # 4. 触发 balance 重算（把当前这笔支出合并进去）
+            # 3. 触发 balance 重算（把当前这笔支出合并进去）
             Clause.rule("compute_event_balance", {
                 "event_id": Var("E"),
                 "trigger_dp_id": Var("DP1"),

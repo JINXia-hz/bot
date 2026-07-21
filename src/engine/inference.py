@@ -65,9 +65,21 @@ class InferenceEngine:
 
     def collect_ops(self) -> list[dict]:
         """获取收集到的所有操作指令，并清空。"""
-        ops = list(self._ops)
+        ops = [self._sanitize_unbound_vars(op) for op in self._ops]
         self._ops.clear()
         return ops
+
+    def _sanitize_unbound_vars(self, value: Any) -> Any:
+        """将未绑定的 Var 替换为 None，避免传入数据库/执行层。"""
+        if isinstance(value, Var):
+            return None
+        if isinstance(value, dict):
+            return {k: self._sanitize_unbound_vars(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._sanitize_unbound_vars(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(self._sanitize_unbound_vars(v) for v in value)
+        return value
 
     # ═══════════════════════════════════════════════
     # 后向链：查询推理
@@ -608,23 +620,28 @@ class InferenceEngine:
             for trigger in rule.triggers:
                 if trigger.get("type") == "action" and trigger.get("op") == fact.predicate:
                     trigger_params = trigger.get("params", {})
-                    if all(k in fact.args for k in trigger_params):
-                        # 构建绑定：trigger Var → fact 值；具体值要求相等
-                        b = Binding()
-                        valid = True
-                        for k, v in trigger_params.items():
-                            fact_val = fact.args.get(k)
+                    # 构建绑定：trigger Var → fact 值；具体值要求相等
+                    b = Binding()
+                    valid = True
+                    for k, v in trigger_params.items():
+                        if k not in fact.args:
+                            # trigger 中的 Var 在 fact 中缺失时，作为可选参数跳过绑定
                             if isinstance(v, Var):
-                                b = b.extend(v, fact_val)
-                                if b is None:
-                                    valid = False
-                                    break
-                            elif fact_val != v:
+                                continue
+                            valid = False
+                            break
+                        fact_val = fact.args[k]
+                        if isinstance(v, Var):
+                            b = b.extend(v, fact_val)
+                            if b is None:
                                 valid = False
                                 break
-                        if valid and b is not None:
-                            matched.append((rule, b))
-                        break
+                        elif fact_val != v:
+                            valid = False
+                            break
+                    if valid and b is not None:
+                        matched.append((rule, b))
+                    break
         return matched
 
     def _match_triggers(self, fact: Fact) -> list:

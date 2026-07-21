@@ -65,6 +65,7 @@ class ContextAssembler:
         result = self.conn.execute("""
             MATCH (e:Event {status: "active"})
             MATCH (dp:DataPoint)-[:BELONGS_TO]->(e)
+            WHERE dp.dp_type IN ['expense', 'income', 'participant_entry']
             WITH e, COLLECT(DISTINCT dp.user_name) AS users
             RETURN e.id, e.title, users
             ORDER BY e.created_at DESC

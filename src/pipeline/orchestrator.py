@@ -178,7 +178,7 @@ class Orchestrator:
 
         try:
             if query_type == "debt":
-                debtor = params.get("debtor", sender)
+                debtor = params.get("debtor")
                 creditor = params.get("creditor")
                 event = params.get("event", "")
                 debts = self.inference.query_debt(debtor, creditor, event)
@@ -243,8 +243,30 @@ class Orchestrator:
         流程：FL → Fact → 前向链 → collect_ops → 落地
         返回：即时回复文本
         """
+        import re
+
         op = fl_payload.get("op", "")
-        params = fl_payload.get("params", {})
+        params = dict(fl_payload.get("params", {}))
+
+        # 规范化 LLM 产出的参数，弥补模型输出格式不稳定的问题
+        if op == "open_event" and "created_by" not in params:
+            msg = self.raw_msg.get(msg_id)
+            params["created_by"] = msg.get("sender", "system") if msg else "system"
+
+        if op == "record_expense":
+            # LLM 有时把 "note" 写成 "title"，需要兼容
+            if "title" in params and "note" not in params:
+                params["note"] = params["title"]
+            # 如果 LLM 没提取金额，从原始消息里补一个
+            if "amount" not in params:
+                msg = self.raw_msg.get(msg_id)
+                content = msg.get("content", "") if msg else ""
+                match = re.search(r'(\d+(?:\.\d+)?)', content)
+                if match:
+                    params["amount"] = float(match.group(1))
+            # 类别默认值
+            if "category" not in params:
+                params["category"] = "其他"
 
         # 注入推理引擎：将 FL 包装为 Fact，触发前向链
         new_fact = Fact(predicate=op, args=params)
