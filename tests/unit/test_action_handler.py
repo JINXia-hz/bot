@@ -108,14 +108,16 @@ class TestActionHandler:
             {"payload": {"debtor": "李四", "creditor": "张三", "amount": 30}},
             {"payload": {"debtor": "王五", "creditor": "张三", "amount": 10}},
         ]
-        success, new_binding = handler._h_extract_debt_item({
+        success, bindings = handler._h_extract_debt_item({
             "debts": debts,
             "debtor": Var("D"),
             "creditor": Var("C"),
             "amount": Var("A"),
         }, Binding())
         assert success is True
-        assert new_binding is not None
-        assert new_binding.get(Var("D")) == "李四"
-        assert new_binding.get(Var("C")) == "张三"
-        assert new_binding.get(Var("A")) == 30
+        assert isinstance(bindings, list)
+        assert len(bindings) == 2
+        first = bindings[0]
+        assert first.get(Var("D")) == "李四"
+        assert first.get(Var("C")) == "张三"
+        assert first.get(Var("A")) == 30

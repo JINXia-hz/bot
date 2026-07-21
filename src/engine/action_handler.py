@@ -33,12 +33,12 @@ class ActionHandler:
     def __init__(self, engine):
         self.engine = engine
 
-    def handle(self, op: str, params: dict, binding: Binding) -> tuple[bool, Binding | None]:
+    def handle(self, op: str, params: dict, binding: Binding) -> tuple[bool, Binding | list[Binding] | None]:
         """分发到具体处理器。"""
         method = getattr(self, f"_h_{op}", None)
         if method is None:
             logger.warning(f"[action_handler] 未知动作: {op}")
-            # 默认：加入 ops 队列
+            # 默认：加入 ops 队列，供上层识别执行
             self.engine._ops.append({"type": "action", "op": op, "params": params})
             return True, binding
         return method(params, binding)
@@ -93,17 +93,63 @@ class ActionHandler:
 
         return True, binding
 
+    def _h_prepend_trigger_expense(self, params: dict, binding: Binding) -> tuple[bool, Binding | None]:
+        """将本次 trigger 的支出合并到已有 expense 列表前。
+
+        前向链一次性推理时，新 expense 尚未写入数据库，需要手动合并。
+        params: {expenses, trigger_dp_id, user_name, amount, category, note, result}
+        """
+        expenses = list(params.get("expenses", [])) if isinstance(params.get("expenses"), list) else []
+        trigger_dp_id = params.get("trigger_dp_id", "")
+        user_name = params.get("user_name", "")
+        amount = params.get("amount", 0)
+        category = params.get("category", "")
+        note = params.get("note", "")
+        result_var = params.get("result")
+
+        new_expense = {
+            "id": trigger_dp_id,
+            "dp_type": "expense",
+            "user_name": user_name,
+            "payload": {"amount": amount, "category": category, "note": note},
+        }
+        merged = [new_expense] + expenses
+
+        if result_var is not None and isinstance(result_var, Var):
+            b = binding.extend(result_var, merged)
+            if b is None:
+                return False, None
+            return True, b
+        return True, binding
+
+    def _h_add_user_to_people(self, params: dict, binding: Binding) -> tuple[bool, Binding | None]:
+        """确保触发支出的用户被计入参与者列表。"""
+        people = list(params.get("people", [])) if isinstance(params.get("people"), list) else []
+        user_name = params.get("user_name", "")
+        result_var = params.get("result")
+
+        if user_name and user_name not in people:
+            people = people + [user_name]
+
+        if result_var is not None and isinstance(result_var, Var):
+            b = binding.extend(result_var, people)
+            if b is None:
+                return False, None
+            return True, b
+        return True, binding
+
     def _h_decompose_debts(self, params: dict, binding: Binding) -> tuple[bool, Binding | None]:
         """将 balance 拆解为债务 dp。
 
-        params: {event_id, balance: {dp dict}}
+        params: {event_id, balance: {dp dict} or balance payload dict}
         对每对净额为正/负的人创建 debt dp。
         """
         event_id = params.get("event_id", "")
         balance = params.get("balance", {})
 
         if isinstance(balance, dict):
-            pl = balance.get("payload", {})
+            # 支持直接传入 payload（如 {人: {paid, owe, net}}）或完整 dp dict
+            pl = balance.get("payload", balance) if "payload" in balance or "dp_type" in balance else balance
         else:
             pl = {}
 
@@ -148,13 +194,7 @@ class ActionHandler:
                     },
                     "event_id": event_id,
                 })
-                self.engine._ops.append({
-                    "type": "link",
-                    "rel_type": "BELONGS_TO",
-                    "from_id": debt_dp_id,
-                    "to_id": event_id,
-                    "props": None,
-                })
+                # BELONGS_TO 由 Orchestrator 在落地 create_dp 时统一建立
                 remaining -= assign
                 creditors[dc_idx] = (creditor, round(credit_amount - assign, 2))
                 if remaining < 0.01:
@@ -162,8 +202,8 @@ class ActionHandler:
 
         return True, binding
 
-    def _h_extract_debt_item(self, params: dict, binding: Binding) -> tuple[bool, Binding | None]:
-        """从债务列表中提取匹配的项并绑定变量。
+    def _h_extract_debt_item(self, params: dict, binding: Binding) -> tuple[bool, list[Binding]]:
+        """从债务列表中提取所有匹配的项并绑定变量。
 
         params: {debts: [dp dict], debtor: Var/str, creditor: Var/str, amount: Var}
         这是后向链的回溯点：每个 match 产生一个 binding。
@@ -174,8 +214,9 @@ class ActionHandler:
         amount_var = params.get("amount")
 
         if not isinstance(debts, list):
-            return False, None
+            return False, []
 
+        bindings: list[Binding] = []
         for debt_dp in debts:
             pl = debt_dp.get("payload", {})
             if isinstance(pl, str):
@@ -213,9 +254,9 @@ class ActionHandler:
                     continue
                 b = ext
 
-            return True, b
+            bindings.append(b)
 
-        return False, None
+        return (len(bindings) > 0), bindings
 
     # ═══════════════════════════════════════════════
     # 预定类动作
@@ -251,14 +292,7 @@ class ActionHandler:
                 },
                 "event_id": event_id,
             })
-            if event_id:
-                self.engine._ops.append({
-                    "type": "link",
-                    "rel_type": "BELONGS_TO",
-                    "from_id": dp_id,
-                    "to_id": event_id,
-                    "props": None,
-                })
+            # BELONGS_TO 由 Orchestrator 在落地 create_dp 时统一建立
 
         return True, binding
 
@@ -378,13 +412,7 @@ class ActionHandler:
             "payload": {"event_title": event_title, "role": "participant"},
             "event_id": event_id,
         })
-        self.engine._ops.append({
-            "type": "link",
-            "rel_type": "BELONGS_TO",
-            "from_id": dp_id,
-            "to_id": event_id,
-            "props": None,
-        })
+        # BELONGS_TO 由 Orchestrator 在落地 create_dp 时统一建立
         return True, binding
 
     # ═══════════════════════════════════════════════
@@ -430,14 +458,7 @@ class ActionHandler:
                     },
                     "event_id": event_id,
                 })
-                if event_id:
-                    self.engine._ops.append({
-                        "type": "link",
-                        "rel_type": "BELONGS_TO",
-                        "from_id": settlement_dp_id,
-                        "to_id": event_id,
-                        "props": None,
-                    })
+                # BELONGS_TO 由 Orchestrator 在落地 create_dp 时统一建立
                 self.engine._ops.append({
                     "type": "link",
                     "rel_type": "DATA_LINE",
@@ -463,14 +484,7 @@ class ActionHandler:
                     },
                     "event_id": event_id,
                 })
-                if event_id:
-                    self.engine._ops.append({
-                        "type": "link",
-                        "rel_type": "BELONGS_TO",
-                        "from_id": residual_dp_id,
-                        "to_id": event_id,
-                        "props": None,
-                    })
+                # BELONGS_TO 由 Orchestrator 在落地 create_dp 时统一建立
                 self.engine._ops.append({
                     "type": "link",
                     "rel_type": "DATA_LINE",
@@ -506,15 +520,28 @@ class ActionHandler:
     def _h_open_event(self, params: dict, binding: Binding) -> tuple[bool, Binding | None]:
         """创建新事件。
 
-        params: {title, created_by, auto_settle_at?}
+        params: {title, created_by, auto_settle_at?, result?}
+        预生成 event_id 并绑定到 result Var，以便后续子句引用。
         """
+        from src.graph.base_repo import _new_id
+
+        event_id = params.get("event_id") or _new_id()
         self.engine._ops.append({
             "type": "create_event",
+            "event_id": event_id,
             "title": params.get("title", "未命名事件"),
             "created_by": params.get("created_by", "system"),
             "trigger_type": params.get("trigger_type", "manual"),
             "auto_settle_at": params.get("auto_settle_at"),
         })
+
+        result_var = params.get("result")
+        if isinstance(result_var, Var):
+            b = binding.extend(result_var, event_id)
+            if b is None:
+                return False, None
+            return True, b
+
         return True, binding
 
     def _h_settle_event(self, params: dict, binding: Binding) -> tuple[bool, Binding | None]:

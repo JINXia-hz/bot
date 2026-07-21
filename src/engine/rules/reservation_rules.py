@@ -30,16 +30,16 @@ def register(rb) -> None:
             "people": Var("PP"),
         }),
         conditions=[
-            # 1. 找到或创建聚会事件
+            # 1. 找到已有聚会事件
             Clause.graph("find_event_like", {"title": Var("T")}, Var("Ev")),
+            Clause.resolve(Var("Ev"), "id", Var("E")),
             # 2. 创建预定 dp（原始记录）
             Clause.create_dp("reservation", {
                 "user_name": Var("U"),
                 "payload": {"title": Var("T"), "content": Var("CT"), "time": Var("TM"), "people": Var("PP")},
                 "event_id": Var("E"),
             }, Var("RP")),
-            # 3. 关联到事件
-            Clause.link("BELONGS_TO", Var("RP"), Var("E")),
+            # 3. 关联到事件（由 Orchestrator 落地 create_dp 时统一建立）
             # 4. 为每个参与者创建个人预定 dp
             Clause.action("create_personal_reservations", {
                 "people": Var("PP"),
@@ -78,28 +78,32 @@ def register(rb) -> None:
         conditions=[
             # 没有匹配到事件
             Clause.not_(Clause.graph("find_event_like", {"title": Var("T")}, Var("Ev"))),
-            # 创建新事件
+            # 创建新事件，并绑定 event_id 到 E
             Clause.action("open_event", {
                 "title": Var("T"),
                 "created_by": Var("U"),
                 "auto_settle_at": Var("TM"),
+                "result": Var("E"),
             }),
             # 创建预定 dp
             Clause.create_dp("reservation", {
                 "user_name": Var("U"),
                 "payload": {"title": Var("T"), "content": Var("CT"), "time": Var("TM"), "people": Var("PP")},
+                "event_id": Var("E"),
             }, Var("RP")),
             # 为每个人创建预定 dp
             Clause.action("create_personal_reservations", {
                 "people": Var("PP"),
                 "title": Var("T"),
                 "time": Var("TM"),
+                "event_id": Var("E"),
             }),
             # 设定时提醒
             Clause.action("schedule_reminder", {
                 "title": Var("T"),
                 "time": Var("TM"),
                 "people": Var("PP"),
+                "event_id": Var("E"),
             }),
         ],
     ))
@@ -117,15 +121,10 @@ def register(rb) -> None:
             "people": Var("PP"),
         }),
         conditions=[
-            # 查询到期预定
+            # 查询到期预定，激活事件并发送通知
             Clause.graph("reservation_due", {}, Var("R")),
             Clause.action("activate_reservation_event", {
                 "reservation": Var("R"),
-            }),
-            # 发送通知
-            Clause.action("notify_event_start", {
-                "title": Var("T"),
-                "people": Var("PP"),
             }),
         ],
     ))

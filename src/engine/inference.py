@@ -18,6 +18,23 @@ from src.engine.graph_searcher import GraphSearcher
 logger = logging.getLogger(__name__)
 
 
+def _get_field(item: dict, field: str) -> Any:
+    """从 item 中提取字段，优先尝试顶层字段，再尝试 payload 嵌套字段。"""
+    if field in item:
+        return item[field]
+    payload = item.get("payload", {})
+    if isinstance(payload, dict):
+        return payload.get(field, 0)
+    if isinstance(payload, str):
+        try:
+            pl = json.loads(payload)
+            if isinstance(pl, dict):
+                return pl.get(field, 0)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return 0
+
+
 class InferenceEngine:
     """规则推理引擎。
 
@@ -420,7 +437,7 @@ class InferenceEngine:
                 total = 0.0
                 for item in (items if isinstance(items, list) else []):
                     if isinstance(item, dict):
-                        total += float(item.get(field, 0))
+                        total += float(_get_field(item, field))
                 return total
             elif op == "count":
                 items = args[0]
@@ -429,7 +446,7 @@ class InferenceEngine:
                 items, field = args[0], args[1]
                 if not isinstance(items, list) or not items:
                     return 0.0
-                total = sum(float(item.get(field, 0)) for item in items if isinstance(item, dict))
+                total = sum(float(_get_field(item, field)) for item in items if isinstance(item, dict))
                 return total / len(items)
             elif op == "divide":
                 return float(args[0]) / float(args[1]) if float(args[1]) != 0 else 0.0
@@ -528,27 +545,23 @@ class InferenceEngine:
             → 计算后绑定变量，不收集 ops（变量被后续子句使用）
           副作用类：create_personal_reservations, schedule_reminder, decompose_debts 等
             → 收集到 ops 队列，返回原 binding
+
+        所有已知动作统一交给 ActionHandler 处理；ActionHandler 对未知动作会回退为
+        收集 action op，供上层（如 Orchestrator）识别并执行。
         """
         op_name = clause["op"]
         params = binding.resolve(clause["params"])
 
-        # 纯副作用动作：不修改 binding，只收集 ops
-        side_effect_ops = {
-            "create_personal_reservations", "schedule_reminder",
-            "activate_reservation_event", "notify_event_start",
-            "open_event", "settle_event", "cancel_event",
-            "ensure_user_in_event", "repay_with_overflow", "decompose_debts",
-        }
+        result = self.action_handler.handle(op_name, params, binding)
+        if not result[0]:
+            return []
 
-        if op_name in side_effect_ops:
-            self._ops.append({"type": "action", "op": op_name, "params": params})
+        new_binding = result[1]
+        if new_binding is None:
             return [binding]
-
-        # 通过 ActionHandler 处理（计算类：可能修改 binding）
-        success, new_binding = self.action_handler.handle(op_name, params, binding)
-        if success:
-            return [new_binding if new_binding is not None else binding]
-        return []
+        if isinstance(new_binding, list):
+            return new_binding
+        return [new_binding]
 
     # ═══════════════════════════════════════════════
     # 前向链：事实驱动的自动推理
@@ -596,14 +609,20 @@ class InferenceEngine:
                 if trigger.get("type") == "action" and trigger.get("op") == fact.predicate:
                     trigger_params = trigger.get("params", {})
                     if all(k in fact.args for k in trigger_params):
-                        # 构建绑定：trigger Var → fact 值
+                        # 构建绑定：trigger Var → fact 值；具体值要求相等
                         b = Binding()
+                        valid = True
                         for k, v in trigger_params.items():
+                            fact_val = fact.args.get(k)
                             if isinstance(v, Var):
-                                b = b.extend(v, fact.args.get(k))
+                                b = b.extend(v, fact_val)
                                 if b is None:
+                                    valid = False
                                     break
-                        if b is not None:
+                            elif fact_val != v:
+                                valid = False
+                                break
+                        if valid and b is not None:
                             matched.append((rule, b))
                         break
         return matched

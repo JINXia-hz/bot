@@ -27,6 +27,8 @@ def register(rb) -> None:
         }),
         conditions=[
             Clause.graph("event_due_settle", {}, Var("Ev")),
+            Clause.resolve(Var("Ev"), "id", Var("E")),
+            Clause.resolve(Var("Ev"), "title", Var("T")),
             Clause.action("settle_event", {
                 "event_id": Var("E"),
                 "title": Var("T"),
@@ -49,6 +51,7 @@ def register(rb) -> None:
         }),
         conditions=[
             Clause.graph("find_event_by_title", {"title": Var("T")}, Var("Ev")),
+            Clause.resolve(Var("Ev"), "id", Var("E")),
             Clause.action("settle_event", {
                 "event_id": Var("E"),
                 "title": Var("T"),
@@ -70,6 +73,7 @@ def register(rb) -> None:
         }),
         conditions=[
             Clause.graph("find_event_by_title", {"title": Var("T")}, Var("Ev")),
+            Clause.resolve(Var("Ev"), "id", Var("E")),
             Clause.action("cancel_event", {
                 "event_id": Var("E"),
             }),

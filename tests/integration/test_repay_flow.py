@@ -13,25 +13,25 @@ class TestRepayFlow:
             "debtor": "李四", "creditor": "张三", "amount": 35,
         }))
 
-        # 应产生 action（repay_with_overflow）
-        action_ops = [o for o in ops if o["type"] == "action"]
-        assert len(action_ops) >= 1, f"Expected repay_with_overflow action, got {ops}"
+        # repay_with_overflow 现在由 ActionHandler 直接处理
+        create_ops = [o for o in ops if o["type"] == "create_dp"]
+        assert len(create_ops) >= 1, f"Expected at least 1 create_dp op, got {ops}"
 
     def test_repay_less_than_debt(self, engine, multi_event_db):
         """还款少于全部债务，部分清偿。"""
         ops = engine.forward_chain(Fact("repay", {
             "debtor": "李四", "creditor": "张三", "amount": 10,
         }))
-        action_ops = [o for o in ops if o["type"] == "action"]
-        assert len(action_ops) >= 1
+        create_ops = [o for o in ops if o["type"] == "create_dp"]
+        assert len(create_ops) >= 1
 
     def test_repay_more_than_all_debts(self, engine, multi_event_db):
         """还款远超所有债务，剩余部分创建反向 credit。"""
         ops = engine.forward_chain(Fact("repay", {
             "debtor": "李四", "creditor": "张三", "amount": 100,
         }))
-        action_ops = [o for o in ops if o["type"] == "action"]
-        assert len(action_ops) >= 1
+        create_ops = [o for o in ops if o["type"] == "create_dp"]
+        assert len(create_ops) >= 1
 
     def test_repay_no_debt(self, engine):
         """两人之间没有债务时，repay 不崩溃。"""

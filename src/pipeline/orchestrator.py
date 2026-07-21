@@ -276,6 +276,7 @@ class Orchestrator:
                     created_by=op_dict.get("created_by", "system"),
                     trigger_type=op_dict.get("trigger_type", EventTriggerType.MANUAL),
                     auto_settle_at=op_dict.get("auto_settle_at"),
+                    event_id=op_dict.get("event_id"),
                 )
                 logger.info(f"[orchestrator] 创建事件 {event_id}: {op_dict.get('title')}")
 

@@ -19,13 +19,13 @@ class TestForwardChain:
         assert create_dps[0]["dp_type"] == "expense"
 
     def test_repay_with_debts(self, engine, multi_event_db):
-        """穿透还款：有了跨事件债务，repay 应该产生 repay_with_overflow 调用。"""
+        """穿透还款：有了跨事件债务，repay 应生成 debt_settled/residual debt。"""
         ops = engine.forward_chain(Fact("repay", {
             "debtor": "李四", "creditor": "张三", "amount": 35,
         }))
-        # 应包含 action（repay_with_overflow 产生的 ops）
-        action_ops = [o for o in ops if o["type"] == "action"]
-        assert len(action_ops) >= 1, f"Expected at least 1 action op, got {ops}"
+        # repay_with_overflow 现在由 ActionHandler 直接处理，产生具体 create_dp/link
+        create_ops = [o for o in ops if o["type"] == "create_dp"]
+        assert len(create_ops) >= 1, f"Expected at least 1 create_dp op, got {ops}"
 
 
 class TestBackwardChain:

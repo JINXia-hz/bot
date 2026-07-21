@@ -35,6 +35,7 @@ def register(rb) -> None:
         conditions=[
             # 1. 搜索事件（从 note 中匹配）
             Clause.graph("find_event_like", {"title": Var("N")}, Var("Ev")),
+            Clause.resolve(Var("Ev"), "id", Var("E")),
             # 1.5 如果用户不在事件中，自动补入
             Clause.action("ensure_user_in_event", {
                 "user_name": Var("U"),
@@ -49,16 +50,20 @@ def register(rb) -> None:
             }, Var("DP1")),
             # 3. 关联事件
             Clause.link("BELONGS_TO", Var("DP1"), Var("E")),
-            # 4. 触发 balance 重算
+            # 4. 触发 balance 重算（把当前这笔支出合并进去）
             Clause.rule("compute_event_balance", {
                 "event_id": Var("E"),
                 "trigger_dp_id": Var("DP1"),
                 "balance_dp_id": Var("DP2"),
+                "user_name": Var("U"),
+                "amount": Var("A"),
+                "category": Var("C"),
+                "note": Var("N"),
             }),
-            # 5. 检查是否需要债务拆解
-            Clause.rule("decompose_debts_if_balanced", {
+            # 5. 拆解债务
+            Clause.action("decompose_debts", {
                 "event_id": Var("E"),
-                "balance_dp_id": Var("DP2"),
+                "balance": Var("Balances"),
             }),
         ],
     ))
@@ -95,25 +100,40 @@ def register(rb) -> None:
 
     rb.register(Rule(
         name="compute_event_balance",
-        conclusion=Fact("balance_computed", {
+        conclusion=Fact("compute_event_balance", {
             "event_id": Var("E"),
             "trigger_dp_id": Var("DP_TRIGGER"),
-            "balance_dp_id": Var("DP_BAL"),
+            "balance_dp_id": Var("DP2"),
         }),
         conditions=[
-            # 1. 获取事件下所有支出
-            Clause.graph("event_expenses", {"event_id": Var("E")}, Var("Expenses")),
-            # 2. 获取事件参与者
+            # 1. 获取事件下所有支出（不含当前 trigger 这笔，因为它还没落地）
+            Clause.graph("event_expenses", {"event_id": Var("E")}, Var("ExistingExpenses")),
+            # 1.5 合并当前 trigger 的支出
+            Clause.action("prepend_trigger_expense", {
+                "expenses": Var("ExistingExpenses"),
+                "trigger_dp_id": Var("DP_TRIGGER"),
+                "user_name": Var("U"),
+                "amount": Var("A"),
+                "category": Var("C"),
+                "note": Var("N"),
+                "result": Var("Expenses"),
+            }),
+            # 2. 获取事件参与者，并补入当前用户
             Clause.graph("event_participants", {"event_id": Var("E")}, Var("People")),
+            Clause.action("add_user_to_people", {
+                "people": Var("People"),
+                "user_name": Var("U"),
+                "result": Var("AllPeople"),
+            }),
             # 3. 计算总和
             Clause.compute("sum", Var("Expenses"), "amount", Var("Total")),
             # 4. 计算人头
-            Clause.compute("count", Var("People"), Var("N")),
+            Clause.compute("count", Var("AllPeople"), Var("Count")),
             # 5. 计算人均
-            Clause.compute("divide", Var("Total"), Var("N"), Var("Per")),
+            Clause.compute("divide", Var("Total"), Var("Count"), Var("Per")),
             # 6. 为每人算净额——用 action 子句让 python 层做循环
             Clause.action("compute_per_person_balance", {
-                "people": Var("People"),
+                "people": Var("AllPeople"),
                 "expenses": Var("Expenses"),
                 "per_person": Var("Per"),
                 "result": Var("Balances"),
@@ -126,22 +146,5 @@ def register(rb) -> None:
             }, Var("DP_BAL")),
             # 8. 建立数据线
             Clause.link("DATA_LINE", Var("DP_TRIGGER"), Var("DP_BAL")),
-        ],
-    ))
-
-    # ── 规则：如果 balance 已存在，拆解债务 ──────────
-
-    rb.register(Rule(
-        name="decompose_debts_if_balanced",
-        conclusion=Fact("debts_decomposed", {
-            "event_id": Var("E"),
-            "balance_dp_id": Var("DP_BAL"),
-        }),
-        conditions=[
-            Clause.graph("get_dp", {"dp_id": Var("DP_BAL")}, Var("BalDP")),
-            Clause.action("decompose_debts", {
-                "event_id": Var("E"),
-                "balance": Var("BalDP"),
-            }),
         ],
     ))
