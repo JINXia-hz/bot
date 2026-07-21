@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bot Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .nav-item.active { background-color: #374151; color: white; }
+    .loading { animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+    .toast {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 50;
+      transition: opacity .3s;
+    }
+    .json-preview { white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+  <div class="flex h-screen">
+    <aside class="w-64 bg-gray-900 text-white flex flex-col flex-shrink-0">
+      <div class="p-4 border-b border-gray-700">
+        <h1 class="text-xl font-bold">🤖 Bot Admin</h1>
+        <p class="text-xs text-gray-400 mt-1">观测与管理数据库</p>
+      </div>
+      <nav class="flex-1 p-2 space-y-1">
+        <a href="#" data-page="dashboard" class="nav-item block px-4 py-2 rounded hover:bg-gray-800">仪表盘</a>
+        <a href="#" data-page="events" class="nav-item block px-4 py-2 rounded hover:bg-gray-800">事件管理</a>
+        <a href="#" data-page="datapoints" class="nav-item block px-4 py-2 rounded hover:bg-gray-800">数据点</a>
+        <a href="#" data-page="messages" class="nav-item block px-4 py-2 rounded hover:bg-gray-800">消息流</a>
+      </nav>
+      <div class="p-4 border-t border-gray-700 text-xs text-gray-500">
+        <span id="health-dot" class="inline-block w-2 h-2 rounded-full bg-gray-500 mr-1"></span>
+        <span id="health-text">检查中...</span>
+      </div>
+    </aside>
+
+    <main class="flex-1 overflow-auto p-6">
+      <div id="content" class="max-w-7xl mx-auto">
+        <div class="text-center py-20 text-gray-500 loading">加载中...</div>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast-container"></div>
+
+  <script>
+    // ── 工具 ──────────────────────────────────────────
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+    async function api(path, options = {}) {
+      const res = await fetch('./api' + path, options);
+      if (!res.ok) {
+        let msg = `请求失败 (${res.status})`;
+        try { const data = await res.json(); msg = data.detail || msg; } catch {}
+        throw new Error(msg);
+      }
+      return res.status === 204 ? null : res.json();
+    }
+
+    function toast(message, type = 'info') {
+      const colors = { info: 'bg-blue-600', success: 'bg-green-600', error: 'bg-red-600' };
+      const el = document.createElement('div');
+      el.className = `toast ${colors[type] || colors.info} text-white px-4 py-3 rounded shadow-lg mb-2`;
+      el.textContent = message;
+      $('#toast-container').appendChild(el);
+      setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 3000);
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return '-';
+      try { return new Date(iso).toLocaleString('zh-CN'); } catch { return iso; }
+    }
+
+    function fmtJson(obj) {
+      return JSON.stringify(obj, null, 2);
+    }
+
+    function truncate(str, n = 60) {
+      return str && str.length > n ? str.slice(0, n) + '...' : (str || '-');
+    }
+
+    // ── 页面渲染 ──────────────────────────────────────
+    const pages = {
+      dashboard: renderDashboard,
+      events: renderEvents,
+      eventDetail: renderEventDetail,
+      datapoints: renderDataPoints,
+      messages: renderMessages,
+    };
+
+    let currentPage = 'dashboard';
+    let pageParams = {};
+
+    function navigate(page, params = {}) {
+      currentPage = page;
+      pageParams = params;
+      $$('.nav-item').forEach(a => a.classList.toggle('active', a.dataset.page === page || (page === 'eventDetail' && a.dataset.page === 'events')));
+      pages[page](params);
+    }
+
+    async function renderDashboard() {
+      $('#content').innerHTML = '<div class="text-center py-20 text-gray-500 loading">加载统计...</div>';
+      try {
+        const stats = await api('/stats');
+        const c = stats.counts;
+        $('#content').innerHTML = `
+          <h2 class="text-2xl font-bold mb-6">仪表盘</h2>
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
+            ${card('活跃事件', stats.active_events, 'text-green-600')}
+            ${card('事件总数', c.events, 'text-blue-600')}
+            ${card('数据点', c.datapoints, 'text-purple-600')}
+            ${card('原始消息', c.rawmessages, 'text-yellow-600')}
+            ${card('格式语言', c.formallanguages, 'text-pink-600')}
+            ${card('行动日志', c.actionlogs, 'text-indigo-600')}
+          </div>
+          <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="font-semibold mb-2">使用说明</h3>
+            <ul class="list-disc list-inside text-sm text-gray-600 space-y-1">
+              <li>事件管理：查看、结算、取消事件。</li>
+              <li>数据点：浏览图数据库中所有 DataPoint 节点。</li>
+              <li>消息流：查看原始群聊消息记录。</li>
+              <li>结算事件会生成 settlement_summary 数据点并标记事件为 settled。</li>
+            </ul>
+          </div>
+        `;
+      } catch (e) {
+        $('#content').innerHTML = errorHtml(e.message);
+      }
+    }
+
+    function card(title, value, color) {
+      return `
+        <div class="bg-white rounded-lg shadow p-4">
+          <div class="text-sm text-gray-500">${title}</div>
+          <div class="text-3xl font-bold ${color}">${value ?? 0}</div>
+        </div>
+      `;
+    }
+
+    async function renderEvents() {
+      $('#content').innerHTML = '<div class="text-center py-20 text-gray-500 loading">加载事件...</div>';
+      try {
+        const events = await api('/events');
+        $('#content').innerHTML = `
+          <div class="flex justify-between items-center mb-6">
+            <h2 class="text-2xl font-bold">事件管理</h2>
+            <select id="event-filter" class="border rounded px-3 py-1 text-sm" onchange="renderEventsList()">
+              <option value="">全部</option>
+              <option value="active">活跃</option>
+              <option value="settled">已结算</option>
+              <option value="cancelled">已取消</option>
+            </select>
+          </div>
+          <div id="events-table" class="bg-white rounded-lg shadow overflow-hidden"></div>
+        `;
+        window.__events = events;
+        renderEventsList();
+      } catch (e) {
+        $('#content').innerHTML = errorHtml(e.message);
+      }
+    }
+
+    function renderEventsList() {
+      const filter = $('#event-filter').value;
+      const events = (window.__events || []).filter(e => !filter || e.status === filter);
+      if (!events.length) {
+        $('#events-table').innerHTML = '<div class="p-8 text-center text-gray-500">暂无事件</div>';
+        return;
+      }
+      $('#events-table').innerHTML = `
+        <table class="min-w-full text-sm">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-4 py-3 text-left font-medium text-gray-600">标题</th>
+              <th class="px-4 py-3 text-left font-medium text-gray-600">状态</th>
+              <th class="px-4 py-3 text-left font-medium text-gray-600">创建者</th>
+              <th class="px-4 py-3 text-left font-medium text-gray-600">创建时间</th>
+              <th class="px-4 py-3 text-left font-medium text-gray-600">自动结算</th>
+              <th class="px-4 py-3 text-right font-medium text-gray-600">操作</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            ${events.map(e => `
+              <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 font-medium">${escapeHtml(e.title)}</td>
+                <td class="px-4 py-3">${statusBadge(e.status)}</td>
+                <td class="px-4 py-3 text-gray-600">${escapeHtml(e.created_by)}</td>
+                <td class="px-4 py-3 text-gray-500">${fmtTime(e.created_at)}</td>
+                <td class="px-4 py-3 text-gray-500">${fmtTime(e.auto_settle_at)}</td>
+                <td class="px-4 py-3 text-right space-x-2">
+                  <button onclick="navigate('eventDetail', {id:'${e.id}'})" class="text-blue-600 hover:underline">详情</button>
+                  ${e.status === 'active' ? `
+                    <button onclick="settleEvent('${e.id}')" class="text-green-600 hover:underline">结算</button>
+                    <button onclick="cancelEvent('${e.id}')" class="text-red-600 hover:underline">取消</button>
+                  ` : ''}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    async function renderEventDetail({ id }) {
+      $('#content').innerHTML = '<div class="text-center py-20 text-gray-500 loading">加载详情...</div>';
+      try {
+        const { event, datapoints, data_lines } = await api(`/events/${id}`);
+        $('#content').innerHTML = `
+          <div class="mb-4">
+            <button onclick="navigate('events')" class="text-blue-600 hover:underline text-sm">← 返回事件列表</button>
+          </div>
+          <h2 class="text-2xl font-bold mb-4">事件：${escapeHtml(event.title)}</h2>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div class="bg-white rounded-lg shadow p-4"><div class="text-sm text-gray-500">状态</div><div>${statusBadge(event.status)}</div></div>
+            <div class="bg-white rounded-lg shadow p-4"><div class="text-sm text-gray-500">创建者</div><div>${escapeHtml(event.created_by)}</div></div>
+            <div class="bg-white rounded-lg shadow p-4"><div class="text-sm text-gray-500">数据点</div><div class="text-xl font-bold">${datapoints.length}</div></div>
+          </div>
+
+          <div class="bg-white rounded-lg shadow mb-6">
+            <div class="px-4 py-3 border-b border-gray-100 font-semibold">数据点</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead class="bg-gray-50"><tr><th class="px-4 py-2 text-left">类型</th><th class="px-4 py-2 text-left">用户</th><th class="px-4 py-2 text-left">创建时间</th><th class="px-4 py-2 text-left">Payload</th></tr></thead>
+                <tbody class="divide-y divide-gray-100">
+                  ${datapoints.map(dp => `
+                    <tr class="hover:bg-gray-50">
+                      <td class="px-4 py-2 font-medium">${dp.dp_type}</td>
+                      <td class="px-4 py-2 text-gray-600">${escapeHtml(dp.user_name)}</td>
+                      <td class="px-4 py-2 text-gray-500">${fmtTime(dp.created_at)}</td>
+                      <td class="px-4 py-2"><pre class="json-preview text-xs bg-gray-50 p-2 rounded">${escapeHtml(fmtJson(dp.payload))}</pre></td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-lg shadow">
+            <div class="px-4 py-3 border-b border-gray-100 font-semibold">数据线（因果链）</div>
+            ${data_lines.length ? `
+              <div class="overflow-x-auto">
+                <table class="min-w-full text-sm">
+                  <thead class="bg-gray-50"><tr><th class="px-4 py-2 text-left">From</th><th class="px-4 py-2 text-left">→</th><th class="px-4 py-2 text-left">To</th><th class="px-4 py-2 text-left">时间</th></tr></thead>
+                  <tbody class="divide-y divide-gray-100">
+                    ${data_lines.map(dl => `
+                      <tr class="hover:bg-gray-50">
+                        <td class="px-4 py-2"><span class="text-gray-500">${dl.from_type}</span><br><code class="text-xs">${dl.from_id.slice(0,8)}</code></td>
+                        <td class="px-4 py-2 text-gray-400">→</td>
+                        <td class="px-4 py-2"><span class="text-gray-500">${dl.to_type}</span><br><code class="text-xs">${dl.to_id.slice(0,8)}</code></td>
+                        <td class="px-4 py-2 text-gray-500">${fmtTime(dl.created_at)}</td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            ` : '<div class="p-4 text-gray-500">暂无数据线</div>'}
+          </div>
+        `;
+      } catch (e) {
+        $('#content').innerHTML = errorHtml(e.message);
+      }
+    }
+
+    async function renderDataPoints() {
+      $('#content').innerHTML = '<div class="text-center py-20 text-gray-500 loading">加载数据点...</div>';
+      try {
+        const [datapoints, events] = await Promise.all([
+          api('/datapoints?limit=200'),
+          api('/events'),
+        ]);
+        window.__dpEvents = events;
+        $('#content').innerHTML = `
+          <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-3">
+            <h2 class="text-2xl font-bold">数据点浏览器</h2>
+            <div class="flex gap-2">
+              <select id="dp-event-filter" class="border rounded px-3 py-1 text-sm" onchange="reloadDataPoints()">
+                <option value="">所有事件</option>
+                ${events.map(e => `<option value="${e.id}">${escapeHtml(e.title)}</option>`).join('')}
+              </select>
+              <input id="dp-type-filter" type="text" placeholder="类型过滤" class="border rounded px-3 py-1 text-sm" oninput="reloadDataPoints()">
+            </div>
+          </div>
+          <div id="dp-table" class="bg-white rounded-lg shadow overflow-hidden"></div>
+        `;
+        window.__datapoints = datapoints;
+        renderDataPointsTable();
+      } catch (e) {
+        $('#content').innerHTML = errorHtml(e.message);
+      }
+    }
+
+    function reloadDataPoints() {
+      const eventId = $('#dp-event-filter').value;
+      const typeFilter = $('#dp-type-filter').value.trim();
+      let filtered = window.__datapoints || [];
+      if (eventId) filtered = filtered.filter(dp => dp.event_id === eventId);
+      if (typeFilter) filtered = filtered.filter(dp => dp.dp_type.includes(typeFilter));
+      renderDataPointsTable(filtered);
+    }
+
+    function renderDataPointsTable(items = window.__datapoints || []) {
+      if (!items.length) {
+        $('#dp-table').innerHTML = '<div class="p-8 text-center text-gray-500">暂无数据点</div>';
+        return;
+      }
+      const eventMap = new Map((window.__dpEvents || []).map(e => [e.id, e.title]));
+      $('#dp-table').innerHTML = `
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead class="bg-gray-50"><tr><th class="px-4 py-3 text-left">类型</th><th class="px-4 py-3 text-left">用户</th><th class="px-4 py-3 text-left">事件</th><th class="px-4 py-3 text-left">时间</th><th class="px-4 py-3 text-left">Payload</th></tr></thead>
+            <tbody class="divide-y divide-gray-100">
+              ${items.map(dp => `
+                <tr class="hover:bg-gray-50">
+                  <td class="px-4 py-3 font-medium">${dp.dp_type}</td>
+                  <td class="px-4 py-3 text-gray-600">${escapeHtml(dp.user_name)}</td>
+                  <td class="px-4 py-3 text-gray-500">${escapeHtml(eventMap.get(dp.event_id) || dp.event_id.slice(0,8) || '-')}</td>
+                  <td class="px-4 py-3 text-gray-500">${fmtTime(dp.created_at)}</td>
+                  <td class="px-4 py-3"><pre class="json-preview text-xs bg-gray-50 p-2 rounded max-h-40 overflow-auto">${escapeHtml(fmtJson(dp.payload))}</pre></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    async function renderMessages() {
+      $('#content').innerHTML = '<div class="text-center py-20 text-gray-500 loading">加载消息...</div>';
+      try {
+        const messages = await api('/messages?limit=200');
+        $('#content').innerHTML = `
+          <div class="flex justify-between items-center mb-6">
+            <h2 class="text-2xl font-bold">消息流</h2>
+            <select id="msg-filter" class="border rounded px-3 py-1 text-sm" onchange="renderMessagesTable()">
+              <option value="">全部</option>
+              <option value="directed">仅 @bot</option>
+              <option value="undirected">仅无向</option>
+            </select>
+          </div>
+          <div id="msg-table" class="bg-white rounded-lg shadow overflow-hidden"></div>
+        `;
+        window.__messages = messages;
+        renderMessagesTable();
+      } catch (e) {
+        $('#content').innerHTML = errorHtml(e.message);
+      }
+    }
+
+    function renderMessagesTable() {
+      const filter = $('#msg-filter').value;
+      let messages = window.__messages || [];
+      if (filter === 'directed') messages = messages.filter(m => m.is_directed);
+      if (filter === 'undirected') messages = messages.filter(m => !m.is_directed);
+      if (!messages.length) {
+        $('#msg-table').innerHTML = '<div class="p-8 text-center text-gray-500">暂无消息</div>';
+        return;
+      }
+      $('#msg-table').innerHTML = `
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead class="bg-gray-50"><tr><th class="px-4 py-3 text-left">时间</th><th class="px-4 py-3 text-left">发送者</th><th class="px-4 py-3 text-left">群号</th><th class="px-4 py-3 text-left">类型</th><th class="px-4 py-3 text-left">内容</th></tr></thead>
+            <tbody class="divide-y divide-gray-100">
+              ${messages.map(m => `
+                <tr class="hover:bg-gray-50">
+                  <td class="px-4 py-3 text-gray-500 whitespace-nowrap">${fmtTime(m.timestamp)}</td>
+                  <td class="px-4 py-3 text-gray-600">${escapeHtml(m.sender)}</td>
+                  <td class="px-4 py-3 text-gray-500">${m.group_id}</td>
+                  <td class="px-4 py-3">${m.is_directed ? '<span class="text-blue-600">@bot</span>' : '<span class="text-gray-400">无向</span>'}</td>
+                  <td class="px-4 py-3">${escapeHtml(m.content)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    // ── 操作 ──────────────────────────────────────────
+    async function settleEvent(id) {
+      if (!confirm('确定要结算该事件吗？这会生成结算摘要数据点。')) return;
+      try {
+        await api(`/events/${id}/settle`, { method: 'POST' });
+        toast('事件已结算', 'success');
+        navigate('events');
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    async function cancelEvent(id) {
+      if (!confirm('确定要取消该事件吗？取消后不可恢复。')) return;
+      try {
+        await api(`/events/${id}/cancel`, { method: 'POST' });
+        toast('事件已取消', 'success');
+        navigate('events');
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    // ── 辅助 ──────────────────────────────────────────
+    function statusBadge(status) {
+      const map = {
+        active: ['bg-green-100 text-green-800', '活跃'],
+        settled: ['bg-blue-100 text-blue-800', '已结算'],
+        cancelled: ['bg-red-100 text-red-800', '已取消'],
+      };
+      const [cls, text] = map[status] || ['bg-gray-100 text-gray-800', status];
+      return `<span class="px-2 py-1 rounded-full text-xs font-medium ${cls}">${text}</span>`;
+    }
+
+    function escapeHtml(text) {
+      if (text == null) return '';
+      return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function errorHtml(message) {
+      return `<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">加载失败：${escapeHtml(message)}</div>`;
+    }
+
+    // ── 初始化 ────────────────────────────────────────
+    $$('.nav-item').forEach(a => {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigate(a.dataset.page);
+      });
+    });
+
+    async function checkHealth() {
+      try {
+        await api('/health');
+        $('#health-dot').className = 'inline-block w-2 h-2 rounded-full bg-green-500 mr-1';
+        $('#health-text').textContent = '服务正常';
+      } catch {
+        $('#health-dot').className = 'inline-block w-2 h-2 rounded-full bg-red-500 mr-1';
+        $('#health-text').textContent = '服务异常';
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      navigate('dashboard');
+      checkHealth();
+      setInterval(checkHealth, 10000);
+    });
+  </script>
+</body>
+</html>

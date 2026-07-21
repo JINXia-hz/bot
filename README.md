@@ -297,6 +297,11 @@ my_rules.register(rb)
 
 ```
 src/
+├── web/                       # Web 管理后台
+│   ├── admin.py               # FastAPI 路由 + API
+│   └── static/
+│       └── index.html         # 前端管理页面（纯 HTML/JS）
+│
 ├── graph/                     # kuzu 图数据库层
 │   ├── connection.py          # 连接管理（单例）
 │   ├── schema.py              # DDL：5 张节点表 + 8 张关系表
@@ -328,7 +333,8 @@ src/
 │   └── scheduler.py           # APScheduler 定时任务（前向链驱动结算）
 │
 └── plugins/                   # NoneBot2 插件层
-    └── listener.py            # 群消息监听 + 有向消息路由
+    ├── listener.py            # 群消息监听 + 有向消息路由
+    └── web_admin.py           # 挂载 Web 管理后台到 NoneBot2 FastAPI
 ```
 
 ---
@@ -357,15 +363,48 @@ copy .env.example .env   # 编辑填入 LLM_API_KEY
 py -3.12 bot.py
 ```
 
+启动后，打开浏览器访问 `http://127.0.0.1:8080/admin`（默认端口）即可进入 Web 管理后台。
+
 ---
 
-## 7. 测试
+## 7. Web 管理后台
 
-62 个测试全部通过，覆盖三层：
+Bot 启动后会自动在 NoneBot2 内置的 FastAPI 应用上挂载 `/admin` 路径，无需额外进程。
+
+### 7.1 功能
+
+- **仪表盘**：统计事件、数据点、原始消息、格式语言、行动日志数量及活跃事件数。
+- **事件管理**：查看事件列表与详情，手动结算或取消活跃事件。
+- **数据点浏览器**：查看所有 `DataPoint` 节点，支持按事件和类型筛选。
+- **消息流**：查看原始群聊消息，支持筛选有向/无向消息。
+
+### 7.2 API
+
+所有页面数据通过 `/admin/api/*` 提供：
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/admin/api/health` | GET | 健康检查 |
+| `/admin/api/stats` | GET | 统计信息 |
+| `/admin/api/events` | GET | 事件列表 |
+| `/admin/api/events/{id}` | GET | 事件详情 |
+| `/admin/api/events/{id}/settle` | POST | 结算事件 |
+| `/admin/api/events/{id}/cancel` | POST | 取消事件 |
+| `/admin/api/datapoints` | GET | 数据点列表（支持 `event_id`、`dp_type`、`limit`） |
+| `/admin/api/datapoints/{id}` | GET | 数据点详情 |
+| `/admin/api/messages` | GET | 原始消息（支持 `group_id`、`is_directed`、`limit`） |
+
+> ⚠️ 安全提示：管理后台默认无鉴权，建议仅在本地或可信内网使用。如需公网暴露，请在 NoneBot2/FastAPI 前增加反向代理鉴权（如 Nginx Basic Auth）。
+
+---
+
+## 8. 测试
+
+77 个测试全部通过，覆盖三层：
 
 | 层 | 测试数 | 测试内容 |
 |---|--------|----------|
-| **单元测试** (`tests/unit/`) | 53 | DSL 全部原语、图的每种命名查询、推理引擎前向/后向链、ActionHandler 全部动作 |
+| **单元测试** (`tests/unit/`) | 68 | DSL 全部原语、图的每种命名查询、推理引擎前向/后向链、ActionHandler 全部动作、Web 管理后台 API |
 | **集成测试** (`tests/integration/`) | 9 | 支出→balance→debt 完整链路、穿透还款多场景、参与者自动补入 |
 | **E2E** | 0 | 暂延迟：需要启动 bot 实例和真实 LLM |
 
@@ -378,7 +417,7 @@ py -3.12 -m pytest tests/ -v
 
 ---
 
-## 8. 技术栈
+## 9. 技术栈
 
 - **Bot 框架**: NoneBot2 + OneBot V11
 - **图数据库**: kuzu（嵌入式，零配置）
